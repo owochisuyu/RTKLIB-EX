@@ -78,7 +78,12 @@
 /* number of parameters (pos,ionos,tropos,hw-bias,phase-bias,real,estimated) */
 #define NF(opt)     ((opt)->ionoopt==IONOOPT_IFLC?1:(opt)->nf)
 #define NP(opt)     ((opt)->dynamics==0?3:9)
-#define NI(opt)     ((opt)->ionoopt!=IONOOPT_EST?0:MAXSAT)
+#define ESTION(opt)  ((opt)->ionoopt==IONOOPT_EST || (opt)->ionoopt==IONOOPT_WEIGHTED)
+#define NI(opt)     (ESTION(opt)?MAXSAT:0)
+/* test_sys() and ddres() use six groups, independently of build-time NSYS. */
+#define DD_NSYS     6
+#define DD_NMAX(ns,opt) ((ns)*NF(opt)*2+2+((opt)->ionoopt==IONOOPT_WEIGHTED?(ns):0))
+#define MIN_ION_STD 1E-4 /* numerical SD zenith floor (m), not an exact constraint */
 #define NT(opt)     ((opt)->tropopt<TROPOPT_EST?0:((opt)->tropopt<TROPOPT_ESTG?2:6))
 #define NL(opt)     ((opt)->glomodear!=GLO_ARMODE_AUTOCAL?0:NFREQGLO)
 #define NB(opt)     ((opt)->mode<=PMODE_DGPS?0:MAXSAT*NF(opt))
@@ -270,7 +275,7 @@ extern int rtkoutstat(rtk_t *rtk, int level, char *buff)
                    rtk->sol.dtr[4]*1E9,rtk->sol.dtr[5]*1E9);
 
         /* Ionospheric parameters */
-        if (est&&rtk->opt.ionoopt==IONOOPT_EST) {
+        if (est&&ESTION(&rtk->opt)) {
             for (int i=0;i<MAXSAT;i++) {
                 ssat=rtk->ssat+i;
                 if (!ssat->vs) continue;
@@ -570,7 +575,7 @@ static void udpos(rtk_t *rtk, double tt)
 /* temporal update of ionospheric parameters ---------------------------------*/
 static void udion(rtk_t *rtk, double tt, double bl, const int *sat, int ns)
 {
-    double el,fact;
+    double el,fact,var;
     int i,j;
 
     trace(3,"udion   : tt=%.3f bl=%.0f ns=%d\n",tt,bl,ns);
@@ -587,7 +592,11 @@ static void udion(rtk_t *rtk, double tt, double bl, const int *sat, int ns)
 
         if (rtk->x[j]==0.0) {
             /* initialize ionospheric delay state */
-            initx(rtk,1E-6,SQR(rtk->opt.std[1]*bl/1E4),j);
+            var=SQR(rtk->opt.std[1]*bl/1E4);
+            if (rtk->opt.ionoopt==IONOOPT_WEIGHTED && var<SQR(MIN_ION_STD)) {
+                var=SQR(MIN_ION_STD);
+            }
+            initx(rtk,1E-6,var,j);
         }
         else {
             /* elevation dependent factor of process noise */
@@ -959,9 +968,9 @@ static void udstate(rtk_t *rtk, const obsd_t *obs, const int *sat,
     udpos(rtk,tt);
 
     /* Temporal update of ionospheric parameters */
-    if (rtk->opt.ionoopt==IONOOPT_EST || rtk->opt.tropopt>=TROPOPT_EST) {
+    if (ESTION(&rtk->opt) || rtk->opt.tropopt>=TROPOPT_EST) {
         double dr[3], bl=baseline(rtk->x,rtk->rb,dr);
-        if (rtk->opt.ionoopt==IONOOPT_EST) {
+        if (ESTION(&rtk->opt)) {
             udion(rtk,tt,bl,sat,ns);
         }
         /* Temporal update of tropospheric parameters */
@@ -1234,14 +1243,16 @@ static int test_sys(int sys, int m)
 static int ddres(rtk_t *rtk, const obsd_t *obs, double dt, const double *x,
                  const double *P, const int *sat, double *y, double *e,
                  double *azel, double *freq, const int *iu, const int *ir,
-                 int ns, double *v, double *H, double *R, int *vflg)
+                 int ns, double *v, double *H, double *R, int *vflg,
+                 int *nphys)
 {
     prcopt_t *opt=&rtk->opt;
     double bl,dr[3],posu[3],posr[3],didxi=0.0,didxj=0.0,*im;
     double *tropr,*tropu,*dtdxr,*dtdxu,*Ri,*Rj,freqi,freqj,*Hi=NULL,df;
     double refvar,minvar;
-    int i,j,k,m,f,nv=0,nb[NFREQ*NSYS*2+2]={0},b=0,sysi,sysj,nf=NF(opt);
-    int frq,code;
+    int i,j,k,m,f,nv=0,nb[DD_NSYS*(NFREQ*2+1)+1]={0},b=0,sysi,sysj,nf=NF(opt);
+    int frq,code,used[MAXSAT]={0},eligible[MAXSAT]={0};
+    double sigion;
 
     trace(3,"ddres   : dt=%.4f ns=%d\n",dt,ns);
 
@@ -1250,7 +1261,7 @@ static int ddres(rtk_t *rtk, const obsd_t *obs, double dt, const double *x,
     /* translate ecef pos to geodetic pos */
     ecef2pos(x,posu); ecef2pos(rtk->rb,posr);
 
-    Ri=mat(ns*nf*2+2,1); Rj=mat(ns*nf*2+2,1); im=mat(ns,1);
+    Ri=mat(DD_NMAX(ns,opt),1); Rj=mat(DD_NMAX(ns,opt),1); im=mat(ns,1);
     tropu=mat(ns,1); tropr=mat(ns,1); dtdxu=mat(ns,3); dtdxr=mat(ns,3);
 
     /* zero out residual phase and code biases for all satellites */
@@ -1261,7 +1272,7 @@ static int ddres(rtk_t *rtk, const obsd_t *obs, double dt, const double *x,
            - only used if kalman filter contains states for ION and TROP delays
            usually insignificant for short baselines (<10km)*/
     for (i=0;i<ns;i++) {
-        if (opt->ionoopt==IONOOPT_EST) {
+        if (ESTION(opt)) {
             im[i]=(ionmapf(posu,azel+iu[i]*2)+ionmapf(posr,azel+ir[i]*2))/2.0;
         }
         if (opt->tropopt>=TROPOPT_EST) {
@@ -1270,7 +1281,7 @@ static int ddres(rtk_t *rtk, const obsd_t *obs, double dt, const double *x,
         }
     }
     /* step through sat systems: m=0:gps/sbs,1:glo,2:gal,3:bds 4:qzs 5:irn*/
-    for (m=0;m<6;m++) {
+    for (m=0;m<DD_NSYS;m++) {
 
         /* step through phases/codes */
         for (f=opt->mode>PMODE_DGPS?0:nf;f<nf*2;f++) {
@@ -1343,7 +1354,7 @@ static int ddres(rtk_t *rtk, const obsd_t *obs, double dt, const double *x,
                         Hi[k]=-e[k+iu[i]*3]+e[k+iu[j]*3];  /* translation of innovation to position states */
                     }
                 }
-                if (opt->ionoopt==IONOOPT_EST) {
+                if (ESTION(opt)) {
                     /* adjust double-differenced measurements by double-differenced ionospheric delay term */
                     didxi=(code?-1.0:1.0)*im[i]*SQR(FREQL1/freqi);
                     didxj=(code?-1.0:1.0)*im[j]*SQR(FREQL1/freqj);
@@ -1472,6 +1483,7 @@ static int ddres(rtk_t *rtk, const obsd_t *obs, double dt, const double *x,
                         rtk->ssat[sat[j]-1].lock[frq],xjj,Pjj);
 #endif
 
+                used[i]=used[j]=1; /* accepted physical DD in THIS call */
                 vflg[nv++]=(sat[i]<<16)|(sat[j]<<8)|((code?1:0)<<4)|(frq);
                 nb[b]++;
             }
@@ -1479,10 +1491,53 @@ static int ddres(rtk_t *rtk, const obsd_t *obs, double dt, const double *x,
         }
     }  /* end of system loop */
 
+    /* Physical data count excludes both baseline and ionospheric constraints. */
+    if (nphys) *nphys=nv;
+
     /* baseline length constraint, for fixed distance between base and rover */
     if (rtk->opt.baseline[0]>0.0&&constbl(rtk,x,P,v,H,Ri,Rj,nv)) {
         vflg[nv++]=3<<4;
         nb[b++]++;
+    }
+    /* Spatial DD prior only. Temporal independence is an explicit approximation;
+     * udion() still supplies the existing initial prior and random walk.
+     * x[II] has the existing EST sign (negative rover-minus-base group delay).
+     * Zero mean is invariant to this sign. Do not insert a positive physical
+     * external correction here without converting its sign and covariance. */
+    if (opt->ionoopt==IONOOPT_WEIGHTED) {
+        sigion=fmax(opt->std[1]*bl/1E4,MIN_ION_STD);
+        for (j=0;j<ns;j++) {
+            k=II(sat[j],opt);
+            eligible[j]=used[j] && rtk->ssat[sat[j]-1].sys!=SYS_SBS &&
+                azel[1+iu[j]*2]>=opt->elmin && azel[1+ir[j]*2]>=opt->elmin &&
+                isfinite(im[j]) && im[j]>0.0 && x[k]!=0.0 &&
+                isfinite(P[k+k*rtk->nx]) && P[k+k*rtk->nx]>0.0;
+        }
+        for (m=0;m<DD_NSYS;m++) {
+            for (i=-1,j=0;j<ns;j++) {
+                if (!eligible[j] || !test_sys(rtk->ssat[sat[j]-1].sys,m)) continue;
+                if (i<0 || azel[1+iu[j]*2]>azel[1+iu[i]*2]) i=j;
+            }
+            if (i<0) continue;
+            for (j=0;j<ns;j++) {
+                if (j==i || !eligible[j] ||
+                    !test_sys(rtk->ssat[sat[j]-1].sys,m)) continue;
+                v[nv]=-im[i]*x[II(sat[i],opt)]+im[j]*x[II(sat[j],opt)];
+                if (H) {
+                    Hi=H+nv*rtk->nx;
+                    for (k=0;k<rtk->nx;k++) Hi[k]=0.0;
+                    Hi[II(sat[i],opt)]= im[i];
+                    Hi[II(sat[j],opt)]=-im[j];
+                }
+                /* Shared reference gives nonzero off-diagonal covariance.
+                 * One block per constellation, independent of physical DDs. */
+                Ri[nv]=SQR(sigion*im[i]);
+                Rj[nv]=SQR(sigion*im[j]);
+                vflg[nv++]=(sat[i]<<16)|(sat[j]<<8)|(2<<4);
+                nb[b]++;
+            }
+            b++;
+        }
     }
     if (H) {trace(5,"H=\n"); tracemat(5,H,rtk->nx,nv,7,4);}
 
@@ -2060,7 +2115,7 @@ static int valpos(rtk_t *rtk, const double *v, const double *R, const int *vflg,
         sat2=(vflg[i]>> 8)&0xFF;
         type=(vflg[i]>> 4)&0xF;
         freq=vflg[i]&0xF;
-        stype=type==0?"L":(type==1?"P":"C");
+        stype=type==0?"L":(type==1?"P":(type==2?"I":"C"));
         errmsg(rtk,"large residual (sat=%2d-%2d %s%d v=%6.3f sig=%.3f)\n",
               sat1,sat2,stype,freq+1,v[i],SQRT(R[i+i*nv]));
     }
@@ -2080,7 +2135,7 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
     gtime_t time=obs[0].time;
     double *rs,*dts,*var,*y,*e,*azel,*freq,*v,*H,*R,*xp,*Pp,*xa,*bias,dt;
     int i,j,f,n=nu+nr,ns,ny,nv,sat[MAXSAT],iu[MAXSAT],ir[MAXSAT];
-    int info,vflg[MAXOBS*NFREQ*2+1],svh[MAXOBS*2];
+    int info,*vflg,svh[MAXOBS*2],nphys;
     int stat=rtk->opt.mode<=PMODE_DGPS?SOLQ_DGPS:SOLQ_FLOAT;
     int nf=opt->ionoopt==IONOOPT_IFLC?1:opt->nf;
 
@@ -2157,7 +2212,8 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
     matcpy(xp,rtk->x,rtk->nx,1);
     matcpy(Pp,rtk->P,rtk->nx,rtk->nx);
 
-    ny=ns*nf*2+2;
+    ny=DD_NMAX(ns,opt);
+    vflg=imat(ny,1);
     v=mat(ny,1); H=zeros(rtk->nx,ny); R=mat(ny,ny); bias=mat(rtk->nx,1);
 
     trace(3,"rover:  dt=%.3f\n",dt);
@@ -2192,8 +2248,9 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
                 O H = partial derivatives
                 O R = double diff measurement error covariances
                 O vflg = list of sats used for dd  */
-        if ((nv=ddres(rtk,obs,dt,xp,Pp,sat,y,e,azel,freq,iu,ir,ns,v,H,R,vflg))<4) {
-            errmsg(rtk,"not enough double-differenced residual, n=%d\n", nv);
+        nv=ddres(rtk,obs,dt,xp,Pp,sat,y,e,azel,freq,iu,ir,ns,v,H,R,vflg,&nphys);
+        if ((opt->ionoopt==IONOOPT_WEIGHTED?nphys:nv)<4) {
+            errmsg(rtk,"not enough double-differenced residual, n=%d\n", nphys);
             stat=SOLQ_NONE;
             break;
         }
@@ -2214,7 +2271,7 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
     if (stat!=SOLQ_NONE&&zdres(0,obs,nu,rs,dts,var,svh,nav,xp,opt,y,e,azel,freq)) {
 
         /* calc double diff residuals again after kalman filter update for float solution */
-        nv=ddres(rtk,obs,dt,xp,Pp,sat,y,e,azel,freq,iu,ir,ns,v,NULL,R,vflg);
+        nv=ddres(rtk,obs,dt,xp,Pp,sat,y,e,azel,freq,iu,ir,ns,v,NULL,R,vflg,NULL);
         
         /* validation of float solution, always returns 1, msg to trace file if large residual */
         if (valpos(rtk,v,R,vflg,nv,4.0)) {
@@ -2244,7 +2301,7 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
             if (zdres(0,obs,nu,rs,dts,var,svh,nav,xa,opt,y,e,azel,freq)) {
 
                 /* post-fit residuals for fixed solution (xa includes fixed phase biases, rtk->xa does not) */
-                nv=ddres(rtk,obs,dt,xa,Pp,sat,y,e,azel,freq,iu,ir,ns,v,NULL,R,vflg);
+                nv=ddres(rtk,obs,dt,xa,Pp,sat,y,e,azel,freq,iu,ir,ns,v,NULL,R,vflg,NULL);
 
                 /* validation of fixed solution, always returns valid */
                 if (valpos(rtk,v,R,vflg,nv,4.0)) {
@@ -2326,6 +2383,7 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
     }
     free(rs); free(dts); free(var); free(y); free(e); free(azel); free(freq);
     free(xp); free(Pp);  free(xa);  free(v); free(H); free(R); free(bias);
+    free(vflg);
 
     if (stat!=SOLQ_NONE) rtk->sol.stat=stat;
 
@@ -2451,6 +2509,13 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
     char msg[128]="";
 
     char tstr[40];
+    if (opt->ionoopt==IONOOPT_WEIGHTED &&
+        (opt->mode<PMODE_DGPS || opt->mode>PMODE_FIXED || opt->niter!=1 ||
+         !isfinite(opt->std[1]) || opt->std[1]<=0.0)) {
+        rtk->sol.stat=SOLQ_NONE;
+        errmsg(rtk,"iono-weighted requires relative mode, niter=1, stdiono>0\n");
+        return 0;
+    }
     trace(3,"rtkpos  : time=%s n=%d\n",time2str(obs[0].time,tstr,3),n);
     trace(4,"obs=\n"); traceobs(4,obs,n);
     /*trace(5,"nav=\n"); tracenav(5,nav);*/

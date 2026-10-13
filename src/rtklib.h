@@ -432,6 +432,7 @@ extern "C" {
 #define IONOOPT_IFLC 3                  /* ionosphere option: L1/L2 or L1/L5 iono-free LC */
 #define IONOOPT_EST 4                   /* ionosphere option: estimation */
 #define IONOOPT_TEC 5                   /* ionosphere option: IONEX TEC model */
+#define IONOOPT_WEIGHTED 7              /* relative ionosphere spatial weighting */
 #define IONOOPT_QZS 6                   /* ionosphere option: QZSS broadcast model */
 
 #define TROPOPT_OFF 0                   /* troposphere option: correction off */
