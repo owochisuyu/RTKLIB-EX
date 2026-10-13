@@ -18,7 +18,7 @@
 
 /* constants/macros ----------------------------------------------------------*/
 
-#define LOOPMAX     10000           /* maximum count of search loop */
+#define LOOPMAX     1000000           /* maximum count of search loop */
 
 #define SGN(x)      ((x)<=0.0?-1.0:1.0)
 #define ROUND(x)    (floor((x)+0.5))
@@ -177,12 +177,13 @@ static int search(int n, int m, const double *L, const double *D,
 * return : status (0:ok,other:error)
 * notes  : matrix stored by column-major order (fortran convension)
 *-----------------------------------------------------------------------------*/
-extern int lambda(int n, int m, const double *a, const double *Q, double *F,
-                  double *s)
+extern int lambda_with_stats(int n, int m, const double *a, const double *Q,
+                             double *F, double *s, double *pf_upper)
 {
     int info;
     double *L,*D,*Z,*z,*E;
     
+    if (pf_upper) *pf_upper=NAN;
     if (n<=0||m<=0) return -1;
     L=zeros(n,n); D=mat(n,1); Z=eye(n); z=mat(n,1); E=mat(n,m);
     
@@ -191,6 +192,20 @@ extern int lambda(int n, int m, const double *a, const double *Q, double *F,
         
         /* lambda reduction (z=Z'*a, Qz=Z'*Q*Z=L'*diag(D)*L) */
         reduction(n,L,D,Z);
+        /* Bootstrapped success probability is a lower bound for ILS success.
+         * Use REDUCED conditional variances in cycles^2, not diag(Q).
+         * log1p/erfc and expm1 retain precision for strong models. */
+        if (pf_upper) {
+            double log_ps=0.0, tail;
+            int k;
+            for (k=0;k<n;k++) {
+                if (!(D[k]>0.0)||!isfinite(D[k])) { log_ps=NAN; break; }
+                tail=erfc(0.5/sqrt(2.0*D[k]));
+                log_ps+=log1p(-tail);
+            }
+            *pf_upper=-expm1(log_ps);
+        }
+        
         matmul("TN",n,1,n,Z,a,z); /* z=Z'*a */
         
         /* mlambda search 
@@ -203,6 +218,12 @@ extern int lambda(int n, int m, const double *a, const double *Q, double *F,
     }
     free(L); free(D); free(Z); free(z); free(E);
     return info;
+}
+/* Compatibility entry point for existing callers (including PPP). */
+extern int lambda(int n, int m, const double *a, const double *Q, double *F,
+                  double *s)
+{
+    return lambda_with_stats(n,m,a,Q,F,s,NULL);
 }
 /* lambda reduction ------------------------------------------------------------
 * reduction by lambda (ref [1]) for integer least square

@@ -1104,6 +1104,8 @@ typedef struct {        /* processing options type */
     double odisp[2][2][11][3]; // Ocean tide loading parameters {rov,base}{amp,phase}
     int  freqopt;       /* disable L2-AR */
     char pppopt[256];   /* ppp option */
+    int  ar_test;       /* ambiguity acceptance test (0:ratio,1:ffrt) */
+    double ffrt_pf;     /* FFRT tolerable failure rate (0.01 or 0.001) */
 } prcopt_t;
 
 typedef struct {        /* solution options type */
@@ -1857,6 +1859,9 @@ EXPORT void strsetdir(const char *dir);
 EXPORT void strsetproxy(const char *addr);
 
 /* integer ambiguity resolution ----------------------------------------------*/
+#include "ffrt.h"
+EXPORT int lambda_with_stats(int n, int m, const double *a, const double *Q,
+                             double *F, double *s, double *pf_upper);
 EXPORT int lambda(int n, int m, const double *a, const double *Q, double *F,
                   double *s);
 EXPORT int lambda_reduction(int n, const double *Q, double *Z);

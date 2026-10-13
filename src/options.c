@@ -93,6 +93,8 @@ EXPORT opt_t sysopts[]={
     {"pos2-gloarmode",  3,  (void *)&prcopt_.glomodear,  GAROPT },
     {"pos2-bdsarmode",  3,  (void *)&prcopt_.bdsmodear,  SWTOPT },
     {"pos2-arfilter",   3,  (void *)&prcopt_.arfilter,   SWTOPT },
+    {"pos2-artest",     3,  (void *)&prcopt_.ar_test,    "0:ratio,1:ffrt"},
+    {"pos2-ffrtpf",     1,  (void *)&prcopt_.ffrt_pf,    "0.01 or 0.001"},
     {"pos2-arthres",    1,  (void *)&prcopt_.thresar[0], ""     },
     {"pos2-arthresmin", 1,  (void *)&prcopt_.thresar[5], ""     },
     {"pos2-arthresmax", 1,  (void *)&prcopt_.thresar[6], ""     },
@@ -362,6 +364,8 @@ extern int loadopts(const char *file, opt_t *opts)
         }
         *p++='\0';
         chop(buff);
+        chop(p);
+        while (*p==' '||*p=='\t') p++;
         if (!(opt=searchopt(buff,opts))) continue;
         
         if (!str2opt(opt,p)) {

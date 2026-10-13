@@ -1767,7 +1767,9 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,in
     int i,j,nb,nb1,info,nx=rtk->nx,na=rtk->na;
     double *DP,*y,*b,*db,*Qb,*Qab,*QQ,s[2];
     int *ix;
-    double coeff[3];
+    double coeff[3],pf_upper=NAN,mu=NAN;
+    int accepted=0;
+    char ffrt_time[40];
 
     trace(3,"resamb_LAMBDA : nx=%d\n",nx);
 
@@ -1824,7 +1826,7 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,in
     /* lambda/mlambda integer least-square estimation */
     /* return best integer solutions */
     /* b are best integer solutions, s are residuals */
-    if (!(info=lambda(nb,2,y,Qb,b,s))) {
+    if (!(info=lambda_with_stats(nb,2,y,Qb,b,s,opt->ar_test?&pf_upper:NULL))) {
         trace(3,"N(1)=     "); tracemat(3,b   ,1,nb,7,2);
         trace(3,"N(2)=     "); tracemat(3,b+nb,1,nb,7,2);
 
@@ -1832,7 +1834,11 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,in
         if (rtk->sol.ratio>999.9) rtk->sol.ratio=999.9f;
 
         /* adjust AR ratio based on # of sats, unless minAR==maxAR */
-        if (opt->thresar[5]!=opt->thresar[6]) {
+        if (opt->ar_test) {
+            mu=opt->ar_test==1?ffrt_mu(opt->ffrt_pf,pf_upper,nb):NAN;
+            rtk->sol.thres=isfinite(mu)&&mu>0.0?(float)(1.0/mu):INFINITY;
+        }
+        else if (opt->thresar[5]!=opt->thresar[6]) {
             nb1=nb<50?nb:50; /* poly only fitted for upto 50 sat pairs */
             /* generate poly coeffs based on nominal AR ratio */
             for ((i=0);i<3;i++) {
@@ -1849,7 +1855,15 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,in
         } else
             rtk->sol.thres=(float)opt->thresar[0];
         /* validation by popular ratio-test of residuals*/
-        if (s[0]<=0.0||s[1]/s[0]>=rtk->sol.thres) {
+        accepted=opt->ar_test?ffrt_accept(s[0],s[1],mu):
+                            (s[0]<=0.0||s[1]/s[0]>=rtk->sol.thres);
+        if (opt->ar_test) {
+            trace(2,"FFRT time=%s n=%d pf_tol=%.9g pf_ils_upper=%.12g mu=%.12g ratio=%.12g threshold=%.12g accepted=%d\n",
+                  time2str(rtk->sol.time,ffrt_time,3),nb,opt->ffrt_pf,pf_upper,mu,
+                  s[0]>0.0?s[1]/s[0]:INFINITY,
+                  isfinite(mu)&&mu>0.0?1.0/mu:INFINITY,accepted);
+        }
+        if (accepted) {
 
             /* init non phase-bias states and covariances with float solution values */
             /* transform float to fixed solution (xa=x-Qab*Qb\(b0-b)) */

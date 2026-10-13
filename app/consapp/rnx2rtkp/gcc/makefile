@@ -26,7 +26,7 @@ LDLIBS  = -lgfortran -lm
 all        : rnx2rtkp
 rnx2rtkp   : rnx2rtkp.o rtkcmn.o trace.o rinex.o rtkpos.o postpos.o solution.o
 rnx2rtkp   : lambda.o geoid.o sbas.o preceph.o pntpos.o ephemeris.o options.o
-rnx2rtkp   : ppp.o ppp_ar.o rtcm.o rtcm2.o rtcm3.o rtcm3e.o ionex.o tides.o
+rnx2rtkp   : ppp.o ppp_ar.o rtcm.o rtcm2.o rtcm3.o rtcm3e.o ionex.o tides.o ffrt.o
 rnx2rtkp   : sofa.o
 
 rnx2rtkp.o : ../rnx2rtkp.c
@@ -75,6 +75,8 @@ tides.o    : $(SRC)/tides.c
 	$(CC) -c $(CFLAGS) $(SRC)/tides.c
 sofa.o     : $(SRC)/sofa.c
 	$(CC) -c $(CFLAGS) $(SRC)/sofa.c
+ffrt.o     : $(SRC)/ffrt.c
+	$(CC) -c $(CFLAGS) $(SRC)/ffrt.c
 
 rnx2rtkp.o : $(SRC)/rtklib.h
 rtkcmn.o   : $(SRC)/rtklib.h
@@ -98,6 +100,7 @@ rtcm3.o    : $(SRC)/rtklib.h
 rtcm3e.o   : $(SRC)/rtklib.h
 ionex.o    : $(SRC)/rtklib.h
 tides.o    : $(SRC)/rtklib.h
+ffrt.o     : $(SRC)/ffrt.h $(SRC)/ffrt_tables.h
 
 CMD1    = ./rnx2rtkp
 INPUT11 = ../../../test/data/rinex/07590920.05o ../../../test/data/rinex/30400920.05n

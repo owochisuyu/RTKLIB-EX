@@ -1612,6 +1612,9 @@ extern int outprcopts(uint8_t *buff, const prcopt_t *opt)
             p+=sprintf(p,"%s val thres : %.1f\r\n",COMMENTH,opt->thresar[0]);
         }
     }
+    if (opt->ar_test) {
+        p+=sprintf(p,"%s AR test   : FFRT-table (LAMBDA 3.0); Pf_tol=%.9g; Pf_ILS=bootstrap-upper-bound\r\n",COMMENTH,opt->ffrt_pf);
+    }
     if (opt->mode==PMODE_MOVEB&&opt->baseline[0]>0.0) {
         p+=sprintf(p,"%s baseline  : %.4f %.4f m\r\n",COMMENTH,
                    opt->baseline[0],opt->baseline[1]);
