@@ -2535,12 +2535,30 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
     /* rover position and time by single point positioning, skip if
      position variance smaller than threshold */
     if (rtk->P[0]==0||rtk->P[0]>STD_PREC_VAR_THRESH) {
+        sol_t sol_prev=rtk->sol;
         if (!pntpos(obs,nu,nav,&rtk->opt,&rtk->sol,NULL,rtk->ssat,msg)) {
             errmsg(rtk,"point pos error (%s)\n",msg);
 
-            if (!rtk->opt.dynamics) {
+            /* autonomous fault recovery: maintain previous valid position if available */
+            if (norm(sol_prev.rr,3)>RE_WGS84/2) {
+                rtk->sol=sol_prev;
+                rtk->sol.time=obs[0].time;
+                trace(2,"spp fault recovery: maintain previous position\n");
+            }
+            else if (!rtk->opt.dynamics) {
                 outsolstat(rtk,nav);
                 return 0;
+            }
+        }
+        else if (norm(sol_prev.rr,3)>RE_WGS84/2) {
+            /* SPP geometric consistency jump check: prevent initial coordinate fly-away */
+            double dr=0.0;
+            for (i=0;i<3;i++) dr+=SQR(rtk->sol.rr[i]-sol_prev.rr[i]);
+            dr=sqrt(dr);
+            double dt=fabs(timediff(rtk->sol.time,sol_prev.time));
+            if (dt<10.0&&dr>50.0+10.0*dt) {
+                trace(2,"spp geometric jump rejected: dr=%.2f dt=%.2f > thres, recover previous pos\n",dr,dt);
+                for (i=0;i<3;i++) rtk->sol.rr[i]=sol_prev.rr[i];
             }
         }
     } else rtk->sol.time=obs[0].time;

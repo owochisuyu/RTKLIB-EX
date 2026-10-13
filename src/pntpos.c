@@ -370,20 +370,40 @@ static int rescode(int iter, const obsd_t *obs, int n, const double *rs,
 /* validate solution ---------------------------------------------------------*/
 static int valsol(const double *azel, const int *vsat, int n,
                   const prcopt_t *opt, const double *v, int nv, int nx,
-                  char *msg)
+                  const double *rr, char *msg)
 {
-    double azels[MAXOBS*2],dop[4],vv;
+    double azels[MAXOBS*2],dop[4],pos[3],r,vv;
     int i,ns;
     
     trace(3,"valsol  : n=%d nv=%d\n",n,nv);
     
-    /* Chi-square validation of residuals */
-    vv=dot(v,v,nv);
-    if (nv>nx&&vv>chisqr[nv-nx-1]) {
-        sprintf(msg,"Warning: large chi-square error nv=%d vv=%.1f cs=%.1f",nv,vv,chisqr[nv-nx-1]);
-        /* return 0; */ /* threshold too strict for all use cases, report error but continue on */
+    /* 1. Geometric and physical feasibility checks */
+    r=norm(rr,3);
+    if (r<RE_WGS84-20000.0||r>RE_WGS84+100000.0) {
+        sprintf(msg,"unphysical radius r=%.1f",r);
+        return 0;
     }
-    /* large GDOP check */
+    ecef2pos(rr,pos);
+    if (pos[2]<-2000.0||pos[2]>50000.0) {
+        sprintf(msg,"unphysical altitude h=%.1f",pos[2]);
+        return 0;
+    }
+    
+    /* 2. Residual consistency and Chi-square check */
+    vv=dot(v,v,nv);
+    if (nv>nx) {
+        double sig0=sqrt(vv/(nv-nx));
+        if (sig0>30.0) { /* normalized residual SD > 30 sigma indicates severe anomaly */
+            sprintf(msg,"excessive residual sigma0=%.1f",sig0);
+            return 0;
+        }
+        if (vv>chisqr[nv-nx-1]) {
+            sprintf(msg,"Warning: large chi-square error nv=%d vv=%.1f cs=%.1f",nv,vv,chisqr[nv-nx-1]);
+            /* return 0; */ /* report warning but continue on */
+        }
+    }
+    
+    /* 3. Large GDOP check */
     for (i=ns=0;i<n;i++) {
         if (!vsat[i]) continue;
         azels[  ns*2]=azel[  i*2];
@@ -456,7 +476,7 @@ static int estpos(const obsd_t *obs, int n, const double *rs, const double *dts,
             sol->age=sol->ratio=0.0;
             
             /* validate solution */
-            if ((stat=valsol(azel,vsat,n,opt,v,nv,NX,msg))) {
+            if ((stat=valsol(azel,vsat,n,opt,v,nv,NX,x,msg))) {
                 sol->stat=opt->sateph==EPHOPT_SBAS?SOLQ_SBAS:SOLQ_SINGLE;
             }
             free(v); free(H); free(var);
@@ -685,8 +705,8 @@ extern int pntpos(const obsd_t *obs, int n, const nav_t *nav,
     /* estimate receiver position and time with pseudorange */
     stat=estpos(obs,n,rs,dts,var,svh,nav,&opt_,sol,azel_,vsat,resp,msg);
     
-    /* RAIM FDE */
-    if (!stat&&n>=6&&opt->posopt[4]) {
+    /* Autonomous RAIM FDE: trigger when estpos failed or failed geometric consistency */
+    if (!stat&&n>=6) {
         stat=raim_fde(obs,n,rs,dts,var,svh,nav,&opt_,ssat,sol,azel_,vsat,resp,msg);
     }
     /* estimate receiver velocity with Doppler */
