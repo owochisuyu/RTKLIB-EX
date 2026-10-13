@@ -82,7 +82,7 @@
 #define NI(opt)     (ESTION(opt)?MAXSAT:0)
 /* test_sys() and ddres() use six groups, independently of build-time NSYS. */
 #define DD_NSYS     6
-#define DD_NMAX(ns,opt) ((ns)*NF(opt)*2+2+((opt)->ionoopt==IONOOPT_WEIGHTED?(ns):0))
+#define DD_NMAX(ns,opt) ((ns)*NF(opt)*2+2)
 #define MIN_ION_STD 1E-4 /* numerical SD zenith floor (m), not an exact constraint */
 #define NT(opt)     ((opt)->tropopt<TROPOPT_EST?0:((opt)->tropopt<TROPOPT_ESTG?2:6))
 #define NL(opt)     ((opt)->glomodear!=GLO_ARMODE_AUTOCAL?0:NFREQGLO)
@@ -580,6 +580,24 @@ static void udion(rtk_t *rtk, double tt, double bl, const int *sat, int ns)
 
     trace(3,"udion   : tt=%.3f bl=%.0f ns=%d\n",tt,bl,ns);
 
+    if (rtk->opt.ionoopt==IONOOPT_WEIGHTED) {
+        /* New nuisance parameters each epoch (Odijk 2002, Sec. 5.4).
+         * Retain the marginal distribution of all persistent states; discard
+         * old ionosphere states and their cross-covariances. The spatial prior
+         * is counted HERE ONCE, not again as zero-centred DD observations.
+         * z is SD equivalent-zenith L1 delay with the existing EST sign.
+         * For s=M*z, P_s=M*P_z*M', and P_DD=D*M*P_z*M'*D'.
+         * Each satellite has its own z: this is a per-epoch reparameterization,
+         * not a common vertical layer parameter or a temporal random walk. */
+        var=SQR(fmax(rtk->opt.std[1]*bl/1E4,MIN_ION_STD));
+        for (i=1;i<=MAXSAT;i++) initx(rtk,0.0,0.0,II(i,&rtk->opt));
+        for (i=0;i<ns;i++) {
+            /* 1 um is the filter's nonzero activity sentinel, not a correction. */
+            initx(rtk,1E-6,var,II(sat[i],&rtk->opt));
+        }
+        return; /* prniono applies only to the continuous EST model below. */
+    }
+
     /* reset ionospheric delays for sats with long outages */
     for (i=1;i<=MAXSAT;i++) {
         j=II(i,&rtk->opt);
@@ -593,9 +611,6 @@ static void udion(rtk_t *rtk, double tt, double bl, const int *sat, int ns)
         if (rtk->x[j]==0.0) {
             /* initialize ionospheric delay state */
             var=SQR(rtk->opt.std[1]*bl/1E4);
-            if (rtk->opt.ionoopt==IONOOPT_WEIGHTED && var<SQR(MIN_ION_STD)) {
-                var=SQR(MIN_ION_STD);
-            }
             initx(rtk,1E-6,var,j);
         }
         else {
@@ -1254,9 +1269,8 @@ static int ddres(rtk_t *rtk, const obsd_t *obs, double dt, const double *x,
     double bl,dr[3],posu[3],posr[3],didxi=0.0,didxj=0.0,*im;
     double *tropr,*tropu,*dtdxr,*dtdxu,*Ri,*Rj,freqi,freqj,*Hi=NULL,df;
     double refvar,minvar;
-    int i,j,k,m,f,nv=0,nb[DD_NSYS*(NFREQ*2+1)+1]={0},b=0,sysi,sysj,nf=NF(opt);
-    int frq,code,used[MAXSAT]={0},eligible[MAXSAT]={0};
-    double sigion;
+    int i,j,k,m,f,nv=0,nb[DD_NSYS*NFREQ*2+1]={0},b=0,sysi,sysj,nf=NF(opt);
+    int frq,code;
 
     trace(3,"ddres   : dt=%.4f ns=%d\n",dt,ns);
 
@@ -1487,7 +1501,6 @@ static int ddres(rtk_t *rtk, const obsd_t *obs, double dt, const double *x,
                         rtk->ssat[sat[j]-1].lock[frq],xjj,Pjj);
 #endif
 
-                used[i]=used[j]=1; /* accepted physical DD in THIS call */
                 vflg[nv++]=(sat[i]<<16)|(sat[j]<<8)|((code?1:0)<<4)|(frq);
                 nb[b]++;
             }
@@ -1495,7 +1508,7 @@ static int ddres(rtk_t *rtk, const obsd_t *obs, double dt, const double *x,
         }
     }  /* end of system loop */
 
-    /* Physical data count excludes both baseline and ionospheric constraints. */
+    /* Physical data count excludes the baseline constraint. */
     if (nphys) *nphys=nv;
 
     /* baseline length constraint, for fixed distance between base and rover */
@@ -1503,46 +1516,9 @@ static int ddres(rtk_t *rtk, const obsd_t *obs, double dt, const double *x,
         vflg[nv++]=3<<4;
         nb[b++]++;
     }
-    /* Spatial DD prior only. Temporal independence is an explicit approximation;
-     * udion() still supplies the existing initial prior and random walk.
-     * x[II] has the existing EST sign (negative rover-minus-base group delay).
-     * Zero mean is invariant to this sign. Do not insert a positive physical
-     * external correction here without converting its sign and covariance. */
-    if (opt->ionoopt==IONOOPT_WEIGHTED) {
-        sigion=fmax(opt->std[1]*bl/1E4,MIN_ION_STD);
-        for (j=0;j<ns;j++) {
-            k=II(sat[j],opt);
-            eligible[j]=used[j] && rtk->ssat[sat[j]-1].sys!=SYS_SBS &&
-                azel[1+iu[j]*2]>=opt->elmin && azel[1+ir[j]*2]>=opt->elmin &&
-                isfinite(im[j]) && im[j]>0.0 && x[k]!=0.0 &&
-                isfinite(P[k+k*rtk->nx]) && P[k+k*rtk->nx]>0.0;
-        }
-        for (m=0;m<DD_NSYS;m++) {
-            for (i=-1,j=0;j<ns;j++) {
-                if (!eligible[j] || !test_sys(rtk->ssat[sat[j]-1].sys,m)) continue;
-                if (i<0 || azel[1+iu[j]*2]>azel[1+iu[i]*2]) i=j;
-            }
-            if (i<0) continue;
-            for (j=0;j<ns;j++) {
-                if (j==i || !eligible[j] ||
-                    !test_sys(rtk->ssat[sat[j]-1].sys,m)) continue;
-                v[nv]=-im[i]*x[II(sat[i],opt)]+im[j]*x[II(sat[j],opt)];
-                if (H) {
-                    Hi=H+nv*rtk->nx;
-                    for (k=0;k<rtk->nx;k++) Hi[k]=0.0;
-                    Hi[II(sat[i],opt)]= im[i];
-                    Hi[II(sat[j],opt)]=-im[j];
-                }
-                /* Shared reference gives nonzero off-diagonal covariance.
-                 * One block per constellation, independent of physical DDs. */
-                Ri[nv]=SQR(sigion*im[i]);
-                Rj[nv]=SQR(sigion*im[j]);
-                vflg[nv++]=(sat[i]<<16)|(sat[j]<<8)|(2<<4);
-                nb[b]++;
-            }
-            b++;
-        }
-    }
+    /* IONOOPT_WEIGHTED already has its once-per-epoch spatial prior in P.
+     * Adding equivalent DD pseudo-observations here would count it twice.
+     * Their induced covariance is represented through H'*P*H in filter(). */
     if (H) {trace(5,"H=\n"); tracemat(5,H,rtk->nx,nv,7,4);}
 
     /* double-differenced measurement error covariance */
