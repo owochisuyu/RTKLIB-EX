@@ -734,27 +734,31 @@ static void detslp_gf(rtk_t *rtk, const obsd_t *obs, int i, int j,
                            const nav_t *nav)
 {
     int k,sat=obs[i].sat;
-    double gf0,gf1;
+    double gf1;
 
     trace(4,"detslp_gf: i=%d j=%d\n",i,j);
 
-    /* skip check if slip already detected or check disabled*/
+    /* skip check if check disabled */
     if (rtk->opt.thresslip==0) return;
-    for (k=0;k<rtk->opt.nf;k++)
-        if (rtk->ssat[sat-1].slip[k]&LLI_SLIP) return;
 
     for (k=1;k<rtk->opt.nf;k++) {
         /* calc SD geomotry free LC of phase between freq0 and freqk */
         if ((gf1=gfobs(obs,i,j,k,nav))==0.0) continue;
 
-        gf0=rtk->ssat[sat-1].gf[k-1];    /* retrieve previous gf */
-        rtk->ssat[sat-1].gf[k-1]=gf1;    /* save current gf for next epoch */
+        /* if slip already detected on this sat/freq (e.g. by LLI or Doppler), reset GF baseline */
+        if (rtk->ssat[sat-1].slip[0]&LLI_SLIP || rtk->ssat[sat-1].slip[k]&LLI_SLIP) {
+            rtk->ssat[sat-1].gf_hist[k-1][0] = gf1;
+            rtk->ssat[sat-1].gf_t[k-1][0] = obs[i].time;
+            rtk->ssat[sat-1].gf_cnt[k-1] = 1;
+            rtk->ssat[sat-1].gf[k-1] = gf1;
+            continue;
+        }
 
-        if (gf0!=0.0&&fabs(gf1-gf0)>rtk->opt.thresslip) {
+        if (detslp_gf_poly(&rtk->ssat[sat-1], k-1, gf1, obs[i].time, rtk->opt.thresslip)) {
             rtk->ssat[sat-1].slip[0]|=LLI_SLIP;
             rtk->ssat[sat-1].slip[k]|=LLI_SLIP;
-            errmsg(rtk,"slip detected GF jump (sat=%2d L1-L%d dGF=%.3f)\n",
-                sat,k+1,gf0-gf1);
+            errmsg(rtk,"slip detected GF jump (sat=%2d L1-L%d GF=%.3f)\n",
+                sat,k+1,gf1);
         }
     }
 }

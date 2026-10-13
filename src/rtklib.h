@@ -296,6 +296,7 @@ extern "C" {
 #define MAXGISLAYER 32                  /* max number of GIS data layers */
 #define MAXRCVCMD   4096                /* max length of receiver commands */
 #define MAX_CODE_BIASES 4               /* max # of different code biases per freq */
+#define MAX_GF_HIST 5                   /* max history epochs for adaptive GF polynomial */
 
 #define RNX2VER     2.10                /* RINEX ver.2 default output version */
 #define RNX3VER     3.00                /* RINEX ver.3 default output version */
@@ -1211,6 +1212,9 @@ typedef struct {        /* satellite status type */
     uint32_t rejc [NFREQ]; /* reject counter */
     double gf[NFREQ-1]; /* geometry-free phase (m) */
     double mw[NFREQ-1]; /* MW-LC (m) */
+    double gf_hist[NFREQ-1][MAX_GF_HIST]; /* adaptive GF history buffer (m) */
+    gtime_t gf_t[NFREQ-1][MAX_GF_HIST];   /* adaptive GF history observation times */
+    int    gf_cnt[NFREQ-1];               /* adaptive GF history valid count */
     double phw;         /* phase windup (cycle) */
     gtime_t pt[2][NFREQ]; /* previous carrier-phase time */
     double  ph[2][NFREQ]; /* previous carrier-phase observable (cycle) */
@@ -1423,6 +1427,8 @@ EXPORT int  testsnr(int base, int freq, double el, double snr,
                     const snrmask_t *mask);
 EXPORT void setcodepri(int sys, int idx, const char *pri);
 EXPORT int  getcodepri(int sys, uint8_t code, const char *opt);
+EXPORT int  detslp_gf_poly(ssat_t *ssat, int f_idx, double gf, gtime_t time,
+                          double thresslip);
 
 /* matrix and vector functions -----------------------------------------------*/
 EXPORT double *mat  (int n, int m);

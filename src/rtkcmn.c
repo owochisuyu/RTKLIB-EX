@@ -4306,6 +4306,151 @@ extern int getstapos(const char *file, const char *name, double *r)
     trace(1, "no station position: %s %s\n", name, file);
     return 0;
 }
+/* adaptive geometry-free polynomial cycle slip detection ----------------------
+* detect cycle slip on geometry-free carrier-phase using adaptive polynomial
+* fitting over a sliding history window.
+* args   : ssat_t *ssat     IO  satellite status struct
+*          int    f_idx     I   frequency index (0 for L1-L2, 1 for L1-L5, etc.)
+*          double gf        I   geometry-free phase (m)
+*          gtime_t time     I   current observation time
+*          double thresslip I   nominal slip threshold (m)
+* return : 1 if cycle slip detected, 0 otherwise
+*-----------------------------------------------------------------------------*/
+EXPORT int detslp_gf_poly(ssat_t *ssat, int f_idx, double gf, gtime_t time,
+                          double thresslip)
+{
+    double dt, dGF, pred = gf, thres = thresslip;
+    int m, M;
+
+    if (!ssat || f_idx < 0 || f_idx >= NFREQ - 1 || thresslip <= 0.0) return 0;
+
+    M = ssat->gf_cnt[f_idx];
+
+    /* check time continuity with last history point */
+    if (M > 0) {
+        dt = timediff(time, ssat->gf_t[f_idx][M - 1]);
+        if (dt <= 0.0 || dt > 15.0) {
+            M = 0; /* large time gap or reversal: reset history */
+        }
+    } else {
+        dt = 0.0;
+    }
+
+    if (M == 0) {
+        /* first epoch: initialize buffer */
+        ssat->gf_hist[f_idx][0] = gf;
+        ssat->gf_t[f_idx][0] = time;
+        ssat->gf_cnt[f_idx] = 1;
+        ssat->gf[f_idx] = gf;
+        return 0;
+    }
+
+    if (M == 1) {
+        /* constant prediction: without rate information, allow up to nominal storm drift (0.10m/s)
+         * while keeping threshold below 1-cycle slip (0.19m) */
+        pred = ssat->gf_hist[f_idx][0];
+        thres = (thresslip > 0.10 ? thresslip : 0.10) * sqrt(dt > 1.0 ? dt : 1.0);
+    }
+    else if (M == 2) {
+        /* linear extrapolation */
+        double dt01 = timediff(ssat->gf_t[f_idx][1], ssat->gf_t[f_idx][0]);
+        if (dt01 > 0.001) {
+            double rate = (ssat->gf_hist[f_idx][1] - ssat->gf_hist[f_idx][0]) / dt01;
+            pred = ssat->gf_hist[f_idx][1] + rate * dt;
+        } else {
+            pred = ssat->gf_hist[f_idx][1];
+        }
+        thres = (thresslip > 0.05 ? thresslip : 0.05) * sqrt(dt > 1.0 ? dt : 1.0);
+    }
+    else {
+        /* quadratic polynomial fitting: y(tau) = c0 + c1*tau + c2*tau^2
+         * tau is time relative to the last historical point (tau <= 0),
+         * current point is at tau = dt > 0. */
+        double tau[MAX_GF_HIST], y[MAX_GF_HIST];
+        double S0 = 0.0, S1 = 0.0, S2 = 0.0, S3 = 0.0, S4 = 0.0;
+        double B0 = 0.0, B1 = 0.0, B2 = 0.0;
+        double D, c0, c1, c2, sum_e2 = 0.0, sig_fit;
+
+        for (m = 0; m < M; m++) {
+            tau[m] = timediff(ssat->gf_t[f_idx][m], ssat->gf_t[f_idx][M - 1]);
+            y[m] = ssat->gf_hist[f_idx][m];
+            double t2 = tau[m] * tau[m];
+            S0 += 1.0;
+            S1 += tau[m];
+            S2 += t2;
+            S3 += t2 * tau[m];
+            S4 += t2 * t2;
+            B0 += y[m];
+            B1 += tau[m] * y[m];
+            B2 += t2 * y[m];
+        }
+
+        /* 3x3 normal matrix determinant */
+        D = S0 * (S2 * S4 - S3 * S3) - S1 * (S1 * S4 - S2 * S3) + S2 * (S1 * S3 - S2 * S2);
+
+        if (fabs(D) > 1e-6) {
+            c0 = (B0 * (S2 * S4 - S3 * S3) - B1 * (S1 * S4 - S3 * S2) + B2 * (S1 * S3 - S2 * S2)) / D;
+            c1 = (S0 * (B1 * S4 - B2 * S3) - S1 * (B0 * S4 - B2 * S2) + S2 * (B0 * S3 - B1 * S2)) / D;
+            c2 = (S0 * (S2 * B2 - S3 * B1) - S1 * (S1 * B2 - S3 * B0) + S2 * (S1 * B1 - S2 * B0)) / D;
+
+            pred = c0 + c1 * dt + c2 * dt * dt;
+
+            for (m = 0; m < M; m++) {
+                double ym_hat = c0 + c1 * tau[m] + c2 * tau[m] * tau[m];
+                sum_e2 += SQR(y[m] - ym_hat);
+            }
+            sig_fit = sqrt(sum_e2 / (M > 3 ? (M - 3) : 1));
+
+            /* adaptive threshold: scales with fit variance and time interval */
+            double adapt_sig = 3.5 * sig_fit;
+            thres = (adapt_sig > thresslip ? adapt_sig : thresslip) * sqrt(dt > 1.0 ? dt : 1.0);
+        } else {
+            /* fallback to linear */
+            double dt01 = timediff(ssat->gf_t[f_idx][M - 1], ssat->gf_t[f_idx][M - 2]);
+            if (dt01 > 0.001) {
+                double rate = (ssat->gf_hist[f_idx][M - 1] - ssat->gf_hist[f_idx][M - 2]) / dt01;
+                pred = ssat->gf_hist[f_idx][M - 1] + rate * dt;
+            } else {
+                pred = ssat->gf_hist[f_idx][M - 1];
+            }
+            thres = (thresslip > 0.05 ? thresslip : 0.05) * sqrt(dt > 1.0 ? dt : 1.0);
+        }
+    }
+
+    /* safety cap: threshold bounded to prevent cycle slip leakage (min L1 slip is 0.19m) */
+    {
+        double max_thres = thresslip > 0.15 ? thresslip : 0.15;
+        if (thres > max_thres) thres = max_thres;
+        if (thres < thresslip) thres = thresslip;
+    }
+
+    dGF = fabs(gf - pred);
+
+    if (dGF > thres) {
+        /* cycle slip detected! Reset history buffer and restart with current value */
+        ssat->gf_hist[f_idx][0] = gf;
+        ssat->gf_t[f_idx][0] = time;
+        ssat->gf_cnt[f_idx] = 1;
+        ssat->gf[f_idx] = gf;
+        return 1;
+    }
+
+    /* no slip: update history buffer */
+    if (M < MAX_GF_HIST) {
+        ssat->gf_hist[f_idx][M] = gf;
+        ssat->gf_t[f_idx][M] = time;
+        ssat->gf_cnt[f_idx] = M + 1;
+    } else {
+        for (m = 0; m < MAX_GF_HIST - 1; m++) {
+            ssat->gf_hist[f_idx][m] = ssat->gf_hist[f_idx][m + 1];
+            ssat->gf_t[f_idx][m] = ssat->gf_t[f_idx][m + 1];
+        }
+        ssat->gf_hist[f_idx][MAX_GF_HIST - 1] = gf;
+        ssat->gf_t[f_idx][MAX_GF_HIST - 1] = time;
+    }
+    ssat->gf[f_idx] = gf;
+    return 0;
+}
 /* dummy application functions for shared library ----------------------------*/
 #if defined(WIN_DLL) || defined(DLL)
 extern int showmsg(const char *format,...) {return 0;}
