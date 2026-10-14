@@ -581,21 +581,87 @@ static void udion(rtk_t *rtk, double tt, double bl, const int *sat, int ns)
     trace(3,"udion   : tt=%.3f bl=%.0f ns=%d\n",tt,bl,ns);
 
     if (rtk->opt.ionoopt==IONOOPT_WEIGHTED) {
-        /* New nuisance parameters each epoch (Odijk 2002, Sec. 5.4).
-         * Retain the marginal distribution of all persistent states; discard
-         * old ionosphere states and their cross-covariances. The spatial prior
-         * is counted HERE ONCE, not again as zero-centred DD observations.
-         * z is SD equivalent-zenith L1 delay with the existing EST sign.
-         * For s=M*z, P_s=M*P_z*M', and P_DD=D*M*P_z*M'*D'.
-         * Each satellite has its own z: this is a per-epoch reparameterization,
-         * not a common vertical layer parameter or a temporal random walk. */
-        var=SQR(fmax(rtk->opt.std[1]*bl/1E4,MIN_ION_STD));
-        for (i=1;i<=MAXSAT;i++) initx(rtk,0.0,0.0,II(i,&rtk->opt));
-        for (i=0;i<ns;i++) {
-            /* 1 um is the filter's nonzero activity sentinel, not a correction. */
-            initx(rtk,1E-6,var,II(sat[i],&rtk->opt));
+        double tau=rtk->opt.iono_tau,dt=fabs(tt);
+        if (!isfinite(dt)||!isfinite(bl)||bl<0.0||!isfinite(tau)||tau<=0.0) {
+            errmsg(rtk,"invalid ionosphere GM time, baseline or correlation time\n");
+            return;
         }
-        return; /* prniono applies only to the continuous EST model below. */
+        /* Bounded Gauss-Markov extension of the spatial weighting model:
+         * Retain state continuity and cross-covariances with other states,
+         * with stationary variance set by the spatial prior.
+         * I_k = phi * I_{k-1} + w_k, with phi = exp(-dt / tau),
+         * Var(w_k) = (1 - phi^2) * var, where var = (stdiono * bl / 10km)^2.
+         * stats-ionotau is in seconds; prn[1] remains an EST noise parameter.
+         * This is not the epoch-independent model of Odijk Sec. 5.4. */
+        var=SQR(fmax(rtk->opt.std[1]*bl/1E4,MIN_ION_STD));
+        if (dt==0.0) {
+            /* No elapsed time: preserve existing states and covariances,
+             * but still establish the prior for newly tracked satellites. */
+            for (i=0;i<ns;i++) {
+                j=II(sat[i],&rtk->opt);
+                if (rtk->x[j]==0.0) initx(rtk,1E-6,var,j);
+            }
+            return;
+        }
+        double phi=exp(-dt/tau);
+        double qfactor=-expm1(-2.0*(dt/tau));
+        int propagate[MAXSAT]={0};
+
+        /* 1. Reset ionospheric delays for sats with long outages */
+        for (i=1;i<=MAXSAT;i++) {
+            j=II(i,&rtk->opt);
+            if (rtk->x[j]!=0.0 &&
+                rtk->ssat[i-1].outc[0]>GAP_RESION && rtk->ssat[i-1].outc[1]>GAP_RESION) {
+                initx(rtk,0.0,0.0,j);
+            }
+        }
+
+        /* 2. Identify active iono states & construct transition scaling */
+        double *diagF=zeros(rtk->nx,1);
+        for (j=0;j<rtk->nx;j++) diagF[j]=1.0;
+
+        for (i=1;i<=MAXSAT;i++) {
+            j=II(i,&rtk->opt);
+            if (rtk->x[j]!=0.0) {
+                diagF[j]=phi;
+                propagate[i-1]=1;
+            }
+        }
+
+        /* Initialize new tracked satellites */
+        for (i=0;i<ns;i++) {
+            j=II(sat[i],&rtk->opt);
+            if (rtk->x[j]==0.0) {
+                initx(rtk,1E-6,var,j);
+                diagF[j]=1.0; /* Just initialized, not scaled */
+            }
+        }
+
+        /* 3. Apply Gauss-Markov time update:
+         * x[i] = phi * x[i]
+         * P_pred = F * P * F^T */
+        for (i=0;i<rtk->nx;i++) {
+            if (diagF[i]!=1.0) rtk->x[i]*=diagF[i];
+            for (j=i;j<rtk->nx;j++) {
+                if (diagF[i]!=1.0 || diagF[j]!=1.0) {
+                    rtk->P[i+j*rtk->nx]*=diagF[i]*diagF[j];
+                    if (i!=j) rtk->P[j+i*rtk->nx]=rtk->P[i+j*rtk->nx];
+                }
+            }
+        }
+
+        /* Add process noise Q to diagonal: Q_jj = (1 - phi^2) * var */
+        for (i=1;i<=MAXSAT;i++) {
+            j=II(i,&rtk->opt);
+            if (propagate[i-1]) {
+                rtk->P[j+j*rtk->nx]+=qfactor*var;
+                /* exp() can underflow after a long gap or very short tau.
+                 * Preserve the nonzero activity sentinel used by filter(). */
+                if (rtk->x[j]==0.0) rtk->x[j]=1E-6;
+            }
+        }
+        free(diagF);
+        return;
     }
 
     /* reset ionospheric delays for sats with long outages */
@@ -1516,9 +1582,9 @@ static int ddres(rtk_t *rtk, const obsd_t *obs, double dt, const double *x,
         vflg[nv++]=3<<4;
         nb[b++]++;
     }
-    /* IONOOPT_WEIGHTED already has its once-per-epoch spatial prior in P.
-     * Adding equivalent DD pseudo-observations here would count it twice.
-     * Their induced covariance is represented through H'*P*H in filter(). */
+    /* IONOOPT_WEIGHTED carries spatial weighting in its GM prior covariance.
+     * Do not add another zero-centred DD prior here. Its induced measurement
+     * covariance is represented through H'*P*H in filter(). */
     if (H) {trace(5,"H=\n"); tracemat(5,H,rtk->nx,nv,7,4);}
 
     /* double-differenced measurement error covariance */
@@ -1795,14 +1861,232 @@ static void holdamb(rtk_t *rtk, const double *xa)
         }
     }
 }
+/* Shared ratio threshold; retain the legacy full-set rounding and bounds. */
+static float ar_ratio_threshold(const prcopt_t *opt, int nb)
+{
+    double coeff[3];
+    float threshold;
+    int i,j,nb1=nb<50?nb:50;
+
+    if (opt->thresar[5]==opt->thresar[6]) return (float)opt->thresar[0];
+    for (i=0;i<3;i++) {
+        coeff[i]=ar_poly_coeffs[i][0];
+        for (j=1;j<5;j++) coeff[i]=coeff[i]*opt->thresar[0]+ar_poly_coeffs[i][j];
+    }
+    threshold=(float)coeff[0];
+    for (i=1;i<3;i++) threshold=(float)(threshold/(nb1+1.0)+coeff[i]);
+    return (float)MIN(MAX(threshold,opt->thresar[5]),opt->thresar[6]);
+}
+
+/* partial ambiguity resolution (PAR) ----------------------------------------*/
+static int solve_PAR(rtk_t *rtk, double *bias, double *xa, int nb, const int *ix,
+                     const double *y_full, const double *Qb_full, const double *Qab_full)
+{
+    prcopt_t *opt = &rtk->opt;
+    int na = rtk->na, nx = rtk->nx;
+    int minamb = opt->par_minamb > 0 ? opt->par_minamb : 4;
+    int m, i, j, k, info, best_m = 0, sat, f;
+    int *order, *in_sub;
+    double *vars, *y_sub, *Qb_sub, *Qab_sub, *b_sub, *db_sub, *QQ_sub, *dy_sub, s_sub[2];
+    double pf_upper_sub = NAN, mu_sub = NAN, thres_sub = 0.0;
+    int accepted_sub = 0;
+    char ffrt_time[40];
+
+    if (nb <= minamb) return 0;
+
+    trace(3, "solve_PAR: start nb=%d minamb=%d\n", nb, minamb);
+
+    order = imat(nb, 1);
+    in_sub = imat(nb, 1);
+    vars = mat(nb, 1);
+
+    /* 1. Calculate float variance for each DD ambiguity and sort ascending */
+    for (i = 0; i < nb; i++) {
+        vars[i] = Qb_full[i + i * nb];
+        order[i] = i;
+    }
+    /* Insertion sort by float variance (nb is small, typically <= 60) */
+    for (i = 1; i < nb; i++) {
+        int tmp_idx = order[i];
+        double tmp_var = vars[tmp_idx];
+        j = i - 1;
+        while (j >= 0 && vars[order[j]] > tmp_var) {
+            order[j + 1] = order[j];
+            j--;
+        }
+        order[j + 1] = tmp_idx;
+    }
+
+    /* 2. Top-down search for largest valid subset of ambiguities */
+    for (m = nb - 1; m >= minamb; m--) {
+        int used[MAXSAT]={0},ns=0;
+        /* Count distinct satellites, including references, across frequencies.
+         * DD dimension alone does not enforce minfixsats. Smaller prefixes
+         * cannot restore a satellite removed from this candidate. */
+        for (i=0;i<m;i++) for (j=0;j<2;j++) {
+            sat=(ix[2*order[i]+j]-na)%MAXSAT;
+            if (!used[sat]) {used[sat]=1;ns++;}
+        }
+        if (ns<opt->minfixsats) break;
+
+        y_sub   = mat(m, 1);
+        Qb_sub  = mat(m, m);
+        Qab_sub = mat(na, m);
+        b_sub   = mat(m, 2);
+        dy_sub  = mat(m, 1);
+        db_sub  = mat(m, 1);
+        QQ_sub  = mat(na, m);
+
+        /* Extract sub-matrices for candidate subset */
+        for (i = 0; i < m; i++) {
+            int oi = order[i];
+            y_sub[i] = y_full[oi];
+            for (j = 0; j < m; j++) {
+                int oj = order[j];
+                Qb_sub[i + j * m] = Qb_full[oi + oj * nb];
+            }
+            for (j = 0; j < na; j++) {
+                Qab_sub[j + i * na] = Qab_full[j + oi * na];
+            }
+        }
+
+        /* Integer search on subset */
+        info = lambda_with_stats(m, 2, y_sub, Qb_sub, b_sub, s_sub, opt->ar_test ? &pf_upper_sub : NULL);
+        if (info == 0) {
+            float ratio = s_sub[0] > 0.0 ? (float)(s_sub[1] / s_sub[0]) : 0.0f;
+            if (ratio > 999.9f) ratio = 999.9f;
+
+            if (opt->ar_test) {
+                mu_sub = opt->ar_test == 1 ? ffrt_mu(opt->ffrt_pf, pf_upper_sub, m) : NAN;
+                thres_sub = isfinite(mu_sub) && mu_sub > 0.0 ? 1.0 / mu_sub : INFINITY;
+                accepted_sub = ffrt_accept(s_sub[0], s_sub[1], mu_sub);
+                trace(2, "PAR FFRT time=%s m=%d/%d pf_tol=%.9g pf_ils=%.12g mu=%.12g ratio=%.2f thres=%.2f acc=%d\n",
+                      time2str(rtk->sol.time, ffrt_time, 3), m, nb, opt->ffrt_pf, pf_upper_sub, mu_sub, ratio, thres_sub, accepted_sub);
+            }
+            else {
+                /* Ratio test threshold */
+                thres_sub = ar_ratio_threshold(opt,m);
+                accepted_sub = (s_sub[0] <= 0.0 || s_sub[1]/s_sub[0] >= thres_sub);
+                trace(3, "PAR Ratio test m=%d/%d ratio=%.2f thres=%.2f acc=%d\n", m, nb, ratio, thres_sub, accepted_sub);
+            }
+
+            if (accepted_sub) {
+                /* 3. PAR Acceptance: Update non-bias states xa, Pa */
+                for (i = 0; i < na; i++) {
+                    rtk->xa[i] = rtk->x[i];
+                    for (j = 0; j < na; j++) rtk->Pa[i + j * na] = rtk->P[i + j * nx];
+                }
+                for (i = 0; i < m; i++) {
+                    dy_sub[i] = y_sub[i] - b_sub[i];
+                }
+
+                if (!matinv(Qb_sub, m)) {
+                    matmul("NN", m, 1, m, Qb_sub, dy_sub, db_sub);
+                    matmulm("NN", na, 1, m, Qab_sub, db_sub, rtk->xa);
+
+                    matmul("NN", na, m, m, Qab_sub, Qb_sub, QQ_sub);
+                    matmulm("NT", na, na, m, QQ_sub, Qab_sub, rtk->Pa);
+
+                    /* Condition all phase-bias states, including unselected
+                     * ones and references. Keep the float filter untouched.
+                     * restamb() would discard these conditional means. */
+                    for (i=0;i<na;i++) xa[i]=rtk->xa[i];
+                    for (i=na;i<nx;i++) {
+                        xa[i]=rtk->x[i];
+                        for (j=0;j<m;j++) {
+                            int ref=ix[2*order[j]],target=ix[2*order[j]+1];
+                            xa[i]-=(rtk->P[i+ref*nx]-rtk->P[i+target*nx])*db_sub[j];
+                        }
+                    }
+                    /* Enforce selected integer differences to roundoff. */
+                    for (j=0;j<m;j++) {
+                        xa[ix[2*order[j]+1]]=xa[ix[2*order[j]]]-b_sub[j];
+                    }
+
+                    /* 4. Update satellite fix flags and ordered bias output */
+                    for (i = 0; i < nb; i++) in_sub[i] = 0;
+                    for (i = 0; i < m; i++) in_sub[order[i]] = 1;
+
+                    /* Mark fix flags */
+                    for (i = 0; i < nb; i++) {
+                        f = (ix[i * 2 + 1] - na) / MAXSAT;
+                        sat = (ix[i * 2 + 1] - na) % MAXSAT + 1;
+                        if (in_sub[i]) {
+                            rtk->ssat[sat - 1].fix[f] = 2; /* fixed */
+                        }
+                        else {
+                            rtk->ssat[sat - 1].fix[f] = 1; /* float */
+                        }
+                    }
+
+                    /* Check reference satellites: if no target sats fixed, drop ref sat */
+                    for (f = 0; f < NF(opt); f++) {
+                        for (int sys = 0; sys < 6; sys++) {
+                            int n_fixed_in_grp = 0;
+                            int ref_sat_grp = 0;
+                            for (i = 0; i < nb; i++) {
+                                int fi = (ix[i * 2 + 1] - na) / MAXSAT;
+                                int si = (ix[i * 2 + 1] - na) % MAXSAT + 1;
+                                int ri = (ix[i * 2] - na) % MAXSAT + 1;
+                                if (fi == f && test_sys(rtk->ssat[si - 1].sys, sys)) {
+                                    ref_sat_grp = ri;
+                                    if (in_sub[i]) n_fixed_in_grp++;
+                                }
+                            }
+                            if (ref_sat_grp > 0 && n_fixed_in_grp == 0) {
+                                rtk->ssat[ref_sat_grp - 1].fix[f] = 1;
+                            }
+                        }
+                    }
+
+                    /* Build ordered bias array corresponding to kept pairs */
+                    int n_bias = 0;
+                    for (i = 0; i < nb; i++) {
+                        if (in_sub[i]) {
+                            /* Find which entry in subset was pair i */
+                            for (k = 0; k < m; k++) {
+                                if (order[k] == i) {
+                                    bias[n_bias++] = b_sub[k];
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    best_m = m;
+                    rtk->sol.ratio = ratio;
+                    rtk->sol.thres = (float)thres_sub;
+                    rtk->nb_ar = m;
+
+                    trace(2, "solve_PAR: successfully fixed subset m=%d/%d (ratio=%.2f thresh=%.2f)\n",
+                          m, nb, rtk->sol.ratio, rtk->sol.thres);
+
+                    free(y_sub); free(Qb_sub); free(Qab_sub); free(b_sub);
+                    free(dy_sub); free(db_sub); free(QQ_sub);
+                    break;
+                }
+            }
+        }
+
+        free(y_sub); free(Qb_sub); free(Qab_sub); free(b_sub);
+        free(dy_sub); free(db_sub); free(QQ_sub);
+    }
+
+    free(order);
+    free(in_sub);
+    free(vars);
+
+    return best_m;
+}
+
 /* resolve integer ambiguity by LAMBDA ---------------------------------------*/
 static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,int sbs)
 {
     prcopt_t *opt=&rtk->opt;
-    int i,j,nb,nb1,info,nx=rtk->nx,na=rtk->na;
+    int i,j,nb,info,nx=rtk->nx,na=rtk->na;
     double *DP,*y,*b,*db,*Qb,*Qab,*QQ,s[2];
     int *ix;
-    double coeff[3],pf_upper=NAN,mu=NAN;
+    double pf_upper=NAN,mu=NAN;
     int accepted=0;
     char ffrt_time[40];
 
@@ -1873,22 +2157,7 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,in
             mu=opt->ar_test==1?ffrt_mu(opt->ffrt_pf,pf_upper,nb):NAN;
             rtk->sol.thres=isfinite(mu)&&mu>0.0?(float)(1.0/mu):INFINITY;
         }
-        else if (opt->thresar[5]!=opt->thresar[6]) {
-            nb1=nb<50?nb:50; /* poly only fitted for upto 50 sat pairs */
-            /* generate poly coeffs based on nominal AR ratio */
-            for ((i=0);i<3;i++) {
-                 coeff[i] = ar_poly_coeffs[i][0];
-                 for ((j=1);j<5;j++)
-                    coeff[i] = coeff[i]*opt->thresar[0]+ar_poly_coeffs[i][j];
-            }
-            /* generate adjusted AR ratio based on # of sat pairs */
-            rtk->sol.thres = (float)coeff[0];
-            for (i=1;i<3;i++) {
-                rtk->sol.thres = (float)(rtk->sol.thres*1.0/(nb1+1.0)+coeff[i]);
-            }
-            rtk->sol.thres = (float)MIN(MAX(rtk->sol.thres,opt->thresar[5]),opt->thresar[6]);
-        } else
-            rtk->sol.thres=(float)opt->thresar[0];
+        else rtk->sol.thres=ar_ratio_threshold(opt,nb);
         /* validation by popular ratio-test of residuals*/
         accepted=opt->ar_test?ffrt_accept(s[0],s[1],mu):
                             (s[0]<=0.0||s[1]/s[0]>=rtk->sol.thres);
@@ -1935,12 +2204,18 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,in
         else { /* validation failed */
             errmsg(rtk,"ambiguity validation failed (nb=%d ratio=%.2f thresh=%.2f s=%.2f/%.2f)\n",
                    nb,s[1]/s[0],rtk->sol.thres,s[0],s[1]);
-            nb=0;
+            if (opt->par) {
+                nb = solve_PAR(rtk, bias, xa, nb, ix, y, Qb, Qab);
+            }
+            else nb = 0;
         }
     }
     else {
         errmsg(rtk,"lambda error (info=%d)\n",info);
-        nb=0;
+        if (opt->par) {
+            nb = solve_PAR(rtk, bias, xa, nb, ix, y, Qb, Qab);
+        }
+        else nb = 0;
     }
     free(ix);
     free(y); free(DP); free(b); free(db); free(Qb); free(Qab); free(QQ);
@@ -1981,7 +2256,7 @@ static int manage_amb_LAMBDA(rtk_t *rtk, double *bias, double *xa, const int *sa
         }
       }
     }
-    if (rtk->sol.prev_ratio2<rtk->sol.thres&&nbsat>=rtk->opt.mindropsats) { 
+    if (!rtk->opt.par && rtk->sol.prev_ratio2<rtk->sol.thres&&nbsat>=rtk->opt.mindropsats) {
       // Find the position of the last excluded sat.
       int i = 0;
       if (rtk->excsat != 0) {
@@ -2491,9 +2766,10 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
     char tstr[40];
     if (opt->ionoopt==IONOOPT_WEIGHTED &&
         (opt->mode<PMODE_DGPS || opt->mode>PMODE_FIXED || opt->niter!=1 ||
-         !isfinite(opt->std[1]) || opt->std[1]<=0.0)) {
+         !isfinite(opt->std[1]) || opt->std[1]<=0.0 ||
+         !isfinite(opt->iono_tau) || opt->iono_tau<=0.0)) {
         rtk->sol.stat=SOLQ_NONE;
-        errmsg(rtk,"iono-weighted requires relative mode, niter=1, stdiono>0\n");
+        errmsg(rtk,"iono-weighted requires relative mode, niter=1, finite stdiono>0 and ionotau>0\n");
         return 0;
     }
     trace(3,"rtkpos  : time=%s n=%d\n",time2str(obs[0].time,tstr,3),n);

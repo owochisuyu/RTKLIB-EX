@@ -433,7 +433,7 @@ extern "C" {
 #define IONOOPT_IFLC 3                  /* ionosphere option: L1/L2 or L1/L5 iono-free LC */
 #define IONOOPT_EST 4                   /* ionosphere option: estimation */
 #define IONOOPT_TEC 5                   /* ionosphere option: IONEX TEC model */
-#define IONOOPT_WEIGHTED 7              /* relative epoch-wise ionosphere weighting */
+#define IONOOPT_WEIGHTED 7              /* relative spatially weighted Gauss-Markov ionosphere */
 #define IONOOPT_QZS 6                   /* ionosphere option: QZSS broadcast model */
 
 #define TROPOPT_OFF 0                   /* troposphere option: correction off */
@@ -1108,6 +1108,9 @@ typedef struct {        /* processing options type */
     char pppopt[256];   /* ppp option */
     int  ar_test;       /* ambiguity acceptance test (0:ratio,1:ffrt) */
     double ffrt_pf;     /* FFRT tolerable failure rate (0.01 or 0.001) */
+    int  par;           /* partial ambiguity resolution (0:off,1:on) */
+    int  par_minamb;    /* minimum number of ambiguities for PAR */
+    double iono_tau;   /* weighted ionosphere GM correlation time (s), >0 */
 } prcopt_t;
 
 typedef struct {        /* solution options type */
