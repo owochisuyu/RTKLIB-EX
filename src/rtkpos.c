@@ -2353,12 +2353,15 @@ static int manage_amb_LAMBDA(rtk_t *rtk, double *bias, double *xa, const int *sa
     return nb;
 }
 
-/* validation of solution ----------------------------------------------------*/
+/* validation of solution and post-fit residual outlier detection ------------*/
 static int valpos(rtk_t *rtk, const double *v, const double *R, const int *vflg,
-                  int nv, double thres)
+                  int nv, double thres, int *exc_sat, int *exc_freq)
 {
     double fact=thres*thres;
     int i,stat=1,sat1,sat2,type,freq;
+    int max_i=-1;
+    double max_z2=0.0;
+    int sat_cnt[MAXSAT]={0};
     char *stype;
 
     trace(3,"valpos  : nv=%d thres=%.1f\n",nv,thres);
@@ -2373,6 +2376,35 @@ static int valpos(rtk_t *rtk, const double *v, const double *R, const int *vflg,
         stype=type==0?"L":(type==1?"P":(type==2?"I":"C"));
         errmsg(rtk,"large residual (sat=%2d-%2d %s%d v=%6.3f sig=%.3f)\n",
               sat1,sat2,stype,freq+1,v[i],SQRT(R[i+i*nv]));
+
+        /* track carrier phase outliers (type==0) */
+        if (type==0) {
+            stat=0; /* phase residual failed validation */
+            if (sat1>0&&sat1<=MAXSAT) sat_cnt[sat1-1]++;
+            if (sat2>0&&sat2<=MAXSAT) sat_cnt[sat2-1]++;
+            double z2=v[i]*v[i]/R[i+i*nv];
+            if (z2>max_z2) {
+                max_z2=z2;
+                max_i=i;
+            }
+        }
+    }
+    if (exc_sat&&exc_freq) {
+        *exc_sat=0;
+        *exc_freq=0;
+        if (max_i>=0) {
+            sat1=(vflg[max_i]>>16)&0xFF;
+            sat2=(vflg[max_i]>> 8)&0xFF;
+            freq=vflg[max_i]&0xF;
+            *exc_freq=freq;
+            /* If base/ref sat1 has multiple large residuals exceeding sat2, sat1 is culprit */
+            if (sat1>0&&sat1<=MAXSAT&&sat_cnt[sat1-1]>1&&sat_cnt[sat1-1]>sat_cnt[sat2-1]) {
+                *exc_sat=sat1;
+            }
+            else {
+                *exc_sat=sat2;
+            }
+        }
     }
     return stat;
 }
@@ -2471,82 +2503,132 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
     vflg=imat(ny,1);
     v=mat(ny,1); H=zeros(rtk->nx,ny); R=mat(ny,ny); bias=mat(rtk->nx,1);
 
-    trace(3,"rover:  dt=%.3f\n",dt);
-    for (i=0;i<opt->niter;i++) {
-        /* calculate zero diff residuals [range - measured pseudorange] for rover (phase and code)
-            output is in y[0:nu-1], only shared input with base is nav
-                obs  = sat observations
-                nu   = # of sats
-                rs   = range to sats
-                dts  = sat clock biases (rover)
-                svh  = sat health flags
-                nav  = sat nav data
-                xp   = kalman states
-                opt  = options
-                y    = zero diff residuals (code and phase)
-                e    = line of sight unit vectors to sats
-                azel = [az, el] to sats                                   */
-        if (!zdres(0,obs,nu,rs,dts,var,svh,nav,xp,opt,y,e,azel,freq)) {
-            errmsg(rtk,"rover initial position error\n");
-            stat=SOLQ_NONE;
-            break;
-        }
-        /* calculate double-differenced residuals and create state matrix from sat angles
-                O rtk->ssat[i].resp[j] = residual pseudorange error
-                O rtk->ssat[i].resc[j] = residual carrier phase error
-                I dt = time diff between base and rover observations
-                I Pp = covariance matrix of float solution
-                I sat = list of common sats
-                I iu,ir = user and ref indices to sats
-                I ns = # of sats
-                O v = double diff residuals (phase and code)
-                O H = partial derivatives
-                O R = double diff measurement error covariances
-                O vflg = list of sats used for dd  */
-        nv=ddres(rtk,obs,dt,xp,Pp,sat,y,e,azel,freq,iu,ir,ns,v,H,R,vflg,&nphys);
-        if ((opt->ionoopt==IONOOPT_WEIGHTED?nphys:nv)<4) {
-            errmsg(rtk,"not enough double-differenced residual, n=%d\n", nphys);
-            stat=SOLQ_NONE;
-            break;
-        }
-        /* kalman filter measurement update, updates x,y,z,sat phase biases, etc
-                K=P*H*(H'*P*H+R)^-1
-                xp=x+K*v
-                Pp=(I-K*H')*P                  */
-        trace(3,"before filter x=");tracemat(3,rtk->x,1,NP(opt),13,6);
-        if ((info=filter(xp,Pp,H,v,R,rtk->nx,nv))) {
-            errmsg(rtk,"filter error (info=%d)\n",info);
-            stat=SOLQ_NONE;
-            break;
-        }
-        trace(3,"after filter x=");tracemat(3,xp,1,NP(opt),13,6);
-        trace(4,"x(%d)=",i+1); tracemat(4,xp,1,NR(opt),13,4);
-    }
-    /* calc zero diff residuals again after kalman filter update */
-    if (stat!=SOLQ_NONE&&zdres(0,obs,nu,rs,dts,var,svh,nav,xp,opt,y,e,azel,freq)) {
+    int exc_phase[MAXSAT][NFREQ]={{0}};
+    int fde_pass, max_fde=3, exc_cnt=0;
 
+    trace(3,"rover:  dt=%.3f\n",dt);
+    for (fde_pass=0; fde_pass<max_fde; fde_pass++) {
+        /* restore prior states xp, Pp from rtk->x, rtk->P */
+        matcpy(xp,rtk->x,rtk->nx,1);
+        matcpy(Pp,rtk->P,rtk->nx,rtk->nx);
+        stat=rtk->opt.mode<=PMODE_DGPS?SOLQ_DGPS:SOLQ_FLOAT;
+
+        for (i=0;i<opt->niter;i++) {
+            /* calculate zero diff residuals [range - measured pseudorange] for rover (phase and code)
+                output is in y[0:nu-1], only shared input with base is nav
+                    obs  = sat observations
+                    nu   = # of sats
+                    rs   = range to sats
+                    dts  = sat clock biases (rover)
+                    svh  = sat health flags
+                    nav  = sat nav data
+                    xp   = kalman states
+                    opt  = options
+                    y    = zero diff residuals (code and phase)
+                    e    = line of sight unit vectors to sats
+                    azel = [az, el] to sats                                   */
+            if (!zdres(0,obs,nu,rs,dts,var,svh,nav,xp,opt,y,e,azel,freq)) {
+                errmsg(rtk,"rover initial position error\n");
+                stat=SOLQ_NONE;
+                break;
+            }
+            /* mask out excluded carrier phase observations for this epoch */
+            if (exc_cnt>0) {
+                for (j=0;j<ns;j++) for (f=0;f<nf;f++) {
+                    if (exc_phase[sat[j]-1][f]) {
+                        y[f+iu[j]*nf*2]=0.0;
+                    }
+                }
+            }
+            /* calculate double-differenced residuals and create state matrix from sat angles
+                    O rtk->ssat[i].resp[j] = residual pseudorange error
+                    O rtk->ssat[i].resc[j] = residual carrier phase error
+                    I dt = time diff between base and rover observations
+                    I Pp = covariance matrix of float solution
+                    I sat = list of common sats
+                    I iu,ir = user and ref indices to sats
+                    I ns = # of sats
+                    O v = double diff residuals (phase and code)
+                    O H = partial derivatives
+                    O R = double diff measurement error covariances
+                    O vflg = list of sats used for dd  */
+            nv=ddres(rtk,obs,dt,xp,Pp,sat,y,e,azel,freq,iu,ir,ns,v,H,R,vflg,&nphys);
+            if ((opt->ionoopt==IONOOPT_WEIGHTED?nphys:nv)<4) {
+                errmsg(rtk,"not enough double-differenced residual, n=%d\n", nphys);
+                stat=SOLQ_NONE;
+                break;
+            }
+            /* kalman filter measurement update, updates x,y,z,sat phase biases, etc
+                    K=P*H*(H'*P*H+R)^-1
+                    xp=x+K*v
+                    Pp=(I-K*H')*P                  */
+            trace(3,"before filter x=");tracemat(3,rtk->x,1,NP(opt),13,6);
+            if ((info=filter(xp,Pp,H,v,R,rtk->nx,nv))) {
+                errmsg(rtk,"filter error (info=%d)\n",info);
+                stat=SOLQ_NONE;
+                break;
+            }
+            trace(3,"after filter x=");tracemat(3,xp,1,NP(opt),13,6);
+            trace(4,"x(%d)=",i+1); tracemat(4,xp,1,NR(opt),13,4);
+        }
+        if (stat==SOLQ_NONE) break;
+
+        /* calc zero diff residuals again after kalman filter update */
+        if (!zdres(0,obs,nu,rs,dts,var,svh,nav,xp,opt,y,e,azel,freq)) {
+            stat=SOLQ_NONE;
+            break;
+        }
+        if (exc_cnt>0) {
+            for (j=0;j<ns;j++) for (f=0;f<nf;f++) {
+                if (exc_phase[sat[j]-1][f]) {
+                    y[f+iu[j]*nf*2]=0.0;
+                }
+            }
+        }
         /* calc double diff residuals again after kalman filter update for float solution */
         nv=ddres(rtk,obs,dt,xp,Pp,sat,y,e,azel,freq,iu,ir,ns,v,NULL,R,vflg,NULL);
-        
-        /* validation of float solution, always returns 1, msg to trace file if large residual */
-        if (valpos(rtk,v,R,vflg,nv,4.0)) {
 
-            /* copy states */
-            matcpy(rtk->x,xp,rtk->nx,1);
-            matcpy(rtk->P,Pp,rtk->nx,rtk->nx);
-
-            /* update valid satellite status for ambiguity control */
-            rtk->sol.ns=0;
-            for (i=0;i<ns;i++) for (f=0;f<nf;f++) {
-                if (!rtk->ssat[sat[i]-1].vsat[f]) continue;
-                rtk->ssat[sat[i]-1].outc[f]=0;
-                if (f==0) rtk->sol.ns++; /* valid satellite count by L1 */
-            }
-            /* too few valid phases */
-            if (rtk->sol.ns<4) stat=SOLQ_DGPS;
+        /* validation of float solution and post-fit outlier identification */
+        int bad_sat=0,bad_frq=0;
+        if (valpos(rtk,v,R,vflg,nv,4.0,&bad_sat,&bad_frq)) {
+            /* validation passed */
+            break;
         }
-        else stat=SOLQ_NONE;
+        else if (bad_sat>0&&fde_pass<max_fde-1&&(ns-exc_cnt>=5)) {
+            trace(2,"valpos FDE [epoch %d pass %d]: outlier sat=%d frq=%d excluded\n",
+                  rtk->epoch,fde_pass,bad_sat,bad_frq+1);
+            for (f=0;f<nf;f++) {
+                exc_phase[bad_sat-1][f]=1;
+                rtk->ssat[bad_sat-1].slip[f]|=LLI_SLIP;
+                rtk->ssat[bad_sat-1].lock[f]=-rtk->opt.minlock;
+                rtk->ssat[bad_sat-1].rejc[f]+=2;
+                rtk->ssat[bad_sat-1].vsat[f]=0;
+                initx(rtk,0.0,0.0,IB(bad_sat,f,opt));
+            }
+            exc_cnt++;
+            continue;
+        }
+        else {
+            break;
+        }
     }
+
+    if (stat!=SOLQ_NONE) {
+        /* copy states */
+        matcpy(rtk->x,xp,rtk->nx,1);
+        matcpy(rtk->P,Pp,rtk->nx,rtk->nx);
+
+        /* update valid satellite status for ambiguity control */
+        rtk->sol.ns=0;
+        for (i=0;i<ns;i++) for (f=0;f<nf;f++) {
+            if (!rtk->ssat[sat[i]-1].vsat[f]) continue;
+            rtk->ssat[sat[i]-1].outc[f]=0;
+            if (f==0) rtk->sol.ns++; /* valid satellite count by L1 */
+        }
+        /* too few valid phases */
+        if (rtk->sol.ns<4) stat=SOLQ_DGPS;
+    }
+    else stat=SOLQ_NONE;
     /* resolve integer ambiguity by LAMBDA */
     if (stat==SOLQ_FLOAT) {
         /* if valid fixed solution, process it */
@@ -2558,8 +2640,8 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
                 /* post-fit residuals for fixed solution (xa includes fixed phase biases, rtk->xa does not) */
                 nv=ddres(rtk,obs,dt,xa,Pp,sat,y,e,azel,freq,iu,ir,ns,v,NULL,R,vflg,NULL);
 
-                /* validation of fixed solution, always returns valid */
-                if (valpos(rtk,v,R,vflg,nv,4.0)) {
+                /* validation of fixed solution */
+                if (valpos(rtk,v,R,vflg,nv,4.0,NULL,NULL)) {
 
                     /* hold integer ambiguity if meet minfix count */
                     if (++rtk->nfix>=rtk->opt.minfix) {
