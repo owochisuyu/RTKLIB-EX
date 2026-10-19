@@ -2189,55 +2189,43 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,in
                   s[0]>0.0?s[1]/s[0]:INFINITY,
                   isfinite(mu)&&mu>0.0?1.0/mu:INFINITY,accepted);
         }
-        if (accepted) {
-
-            /* init non phase-bias states and covariances with float solution values */
-            /* transform float to fixed solution (xa=x-Qab*Qb\(b0-b)) */
-            for (i=0;i<na;i++) {
-                rtk->xa[i]=rtk->x[i];
-                for (j=0;j<na;j++) rtk->Pa[i+j*na]=rtk->P[i+j*nx];
-            }
-            /* y = differences between float and fixed dd phase-biases
-               bias = fixed dd phase-biases   */
-            for (i=0;i<nb;i++) {
-                bias[i]=b[i];
-                y[i]-=b[i];
-            }
-            /* adjust non phase-bias states and covariances using fixed solution values */
-            if (!matinv(Qb,nb)) {  /* returns 0 if inverse successful */
-                /* rtk->xa = rtk->x-Qab*Qb^-1*(b0-b) */
-                matmul("NN",nb,1,nb,Qb ,y,db); /* db = Qb^-1*(b0-b) */
-                matmulm("NN",na,1,nb,Qab,db,rtk->xa); /* rtk->xa = rtk->x-Qab*db */
-                
-                /* rtk->Pa=rtk->P-Qab*Qb^-1*Qab') */
-                /* covariance of fixed solution (Qa=Qa-Qab*Qb^-1*Qab') */
-                matmul("NN",na,nb,nb,Qab,Qb ,QQ);  /* QQ = Qab*Qb^-1 */
-                matmulm("NT",na,na,nb,QQ ,Qab,rtk->Pa); /* rtk->Pa = rtk->P-QQ*Qab' */
-                
-                trace(3,"resamb : validation ok (nb=%d ratio=%.2f thresh=%.2f s=%.2f/%.2f)\n",
-                      nb,s[0]==0.0?0.0:s[1]/s[0],rtk->sol.thres,s[0],s[1]);
-
-                /* translate double diff fixed phase-bias values to single diff
-                fix phase-bias values, result in xa */
-                restamb(rtk,bias,db,ix,nb,xa);
-            }
-            else nb=0;
+        /* ML training dataset preparation: unconditionally resolve optimal full-set integer ambiguity */
+        for (i=0;i<na;i++) {
+            rtk->xa[i]=rtk->x[i];
+            for (j=0;j<na;j++) rtk->Pa[i+j*na]=rtk->P[i+j*nx];
         }
-        else { /* validation failed */
-            errmsg(rtk,"ambiguity validation failed (nb=%d ratio=%.2f thresh=%.2f s=%.2f/%.2f)\n",
-                   nb,s[1]/s[0],rtk->sol.thres,s[0],s[1]);
-            if (opt->par) {
-                nb = solve_PAR(rtk, bias, xa, nb, ix, y, Qb, Qab);
-            }
-            else nb = 0;
+        /* y = differences between float and fixed dd phase-biases
+           bias = fixed dd phase-biases   */
+        for (i=0;i<nb;i++) {
+            bias[i]=b[i];
+            y[i]-=b[i];
+        }
+        /* adjust non phase-bias states and covariances using fixed solution values */
+        if (!matinv(Qb,nb)) {  /* returns 0 if inverse successful */
+            /* rtk->xa = rtk->x-Qab*Qb^-1*(b0-b) */
+            matmul("NN",nb,1,nb,Qb ,y,db); /* db = Qb^-1*(b0-b) */
+            matmulm("NN",na,1,nb,Qab,db,rtk->xa); /* rtk->xa = rtk->x-Qab*db */
+            
+            /* rtk->Pa=rtk->P-Qab*Qb^-1*Qab') */
+            /* covariance of fixed solution (Qa=Qa-Qab*Qb^-1*Qab') */
+            matmul("NN",na,nb,nb,Qab,Qb ,QQ);  /* QQ = Qab*Qb^-1 */
+            matmulm("NT",na,na,nb,QQ ,Qab,rtk->Pa); /* rtk->Pa = rtk->P-QQ*Qab' */
+            
+            trace(3,"resamb : unconditional full-set fix (nb=%d ratio=%.2f thresh=%.2f s=%.2f/%.2f accepted=%d)\n",
+                  nb,s[0]==0.0?0.0:s[1]/s[0],rtk->sol.thres,s[0],s[1],accepted);
+
+            /* translate double diff fixed phase-bias values to single diff
+               fix phase-bias values, result in xa */
+            restamb(rtk,bias,db,ix,nb,xa);
+        }
+        else {
+            trace(2,"resamb : matinv(Qb) failed for nb=%d\n",nb);
+            nb=0;
         }
     }
     else {
         errmsg(rtk,"lambda error (info=%d)\n",info);
-        if (opt->par) {
-            nb = solve_PAR(rtk, bias, xa, nb, ix, y, Qb, Qab);
-        }
-        else nb = 0;
+        nb = 0;
     }
     free(ix);
     free(y); free(DP); free(b); free(db); free(Qb); free(Qab); free(QQ);
@@ -2437,6 +2425,67 @@ static void exclude_phase(double *y, const int *sat, const int *iu, int ns,
     int i,f;
     for (i=0;i<ns;i++) for (f=0;f<nf;f++) {
         if (excluded[sat[i]-1][f]) y[f+iu[i]*nf*2]=0.0;
+    }
+}
+/* output ML sample for training set preparation -------------------------------*/
+static void dump_ml_sample(const rtk_t *rtk)
+{
+    const char *ml_file = getenv("RTK_ML_SAMPLE_FILE");
+    char tstr[64];
+    double dop[4] = {0}, azel[2*MAXSAT];
+    double dr[3], blen_km = 0.0;
+    int i, f, nsat = 0;
+
+    time2str(rtk->sol.time, tstr, 3);
+
+    /* calculate PDOP from satellites used in AR */
+    for (i = 0; i < MAXSAT; i++) {
+        for (f = 0; f < NF(&rtk->opt); f++) {
+            if (rtk->ssat[i].fix[f] == 2) {
+                azel[2*nsat  ] = rtk->ssat[i].azel[0];
+                azel[2*nsat+1] = rtk->ssat[i].azel[1];
+                nsat++;
+                break;
+            }
+        }
+    }
+    if (nsat >= 4) {
+        dops(nsat, azel, 0.0, dop);
+    }
+    else {
+        /* fallback to all valid sats if AR sats < 4 */
+        nsat = 0;
+        for (i = 0; i < MAXSAT; i++) {
+            if (!rtk->ssat[i].vs) continue;
+            azel[2*nsat  ] = rtk->ssat[i].azel[0];
+            azel[2*nsat+1] = rtk->ssat[i].azel[1];
+            nsat++;
+        }
+        if (nsat >= 4) dops(nsat, azel, 0.0, dop);
+    }
+
+    if (norm(rtk->sol.rr, 3) > 1e6 && norm(rtk->rb, 3) > 1e6) {
+        for (i = 0; i < 3; i++) dr[i] = rtk->sol.rr[i] - rtk->rb[i];
+        blen_km = norm(dr, 3) / 1000.0;
+    }
+    int lasting_epochs = rtk->epoch + 1;
+
+    trace(2, "ML_SAMPLE,%s,%d,%.6f,%d,%.4f,%d,%.3f,%.4f,%.4f,%.4f,%d\n",
+          tstr, rtk->epoch, rtk->sol.ratio, lasting_epochs, blen_km,
+          rtk->nb_ar, dop[1], rtk->sol.rr[0], rtk->sol.rr[1], rtk->sol.rr[2], rtk->sol.ns);
+
+    if (ml_file && *ml_file) {
+        FILE *fp_ml = fopen(ml_file, "a");
+        if (fp_ml) {
+            long pos = ftell(fp_ml);
+            if (pos == 0) {
+                fprintf(fp_ml, "time_gpst,epoch,ratio,lasting_epochs,blen_km,amb_dim,pdop,x,y,z,ns\n");
+            }
+            fprintf(fp_ml, "%s,%d,%.6f,%d,%.4f,%d,%.3f,%.4f,%.4f,%.4f,%d\n",
+                    tstr, rtk->epoch, rtk->sol.ratio, lasting_epochs, blen_km,
+                    rtk->nb_ar, dop[1], rtk->sol.rr[0], rtk->sol.rr[1], rtk->sol.rr[2], rtk->sol.ns);
+            fclose(fp_ml);
+        }
     }
 }
 /* relpos()relative positioning ------------------------------------------------------
@@ -2666,24 +2715,12 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
                 /* post-fit residuals for fixed solution (xa includes fixed phase biases, rtk->xa does not) */
                 nv=ddres(rtk,obs,dt,xa,Pp,sat,y,e,azel,freq,iu,ir,ns,v,NULL,R,vflg,NULL);
 
-                /* validation of fixed solution */
-                if (valpos(rtk,v,R,vflg,nv,4.0,NULL,NULL)) {
+                /* validation of fixed solution (recorded for diagnostic trace) */
+                int val_ok = valpos(rtk,v,R,vflg,nv,4.0,NULL,NULL);
+                trace(3,"valpos post-fix residual check: %d\n", val_ok);
 
-                    /* hold integer ambiguity if meet minfix count */
-                    if (++rtk->nfix>=rtk->opt.minfix) {
-                        // Note that the modear needs to be fix-and-hold in
-                        // order for glomodear fix-and-hold to be applied here,
-                        // to prevent glomodear alone forcing fix-and-hold.
-                        if (rtk->opt.modear==ARMODE_FIXHOLD)
-                            holdamb(rtk,xa);
-                        /* switch to kinematic after qualify for hold if in static-start mode */
-                        if (rtk->opt.mode==PMODE_STATIC_START) {
-                            rtk->opt.mode=PMODE_KINEMA;
-                            trace(3,"Fix and hold complete: switch to kinematic mode\n");
-                        }
-                    }
-                    stat=SOLQ_FIX;
-                }
+                /* ML training dataset preparation: ALWAYS adopt optimal full-set fixed coordinates, NEVER call holdamb */
+                stat=SOLQ_FIX;
             }
         }
     }
@@ -2755,6 +2792,8 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
     free(vflg);
 
     if (stat!=SOLQ_NONE) rtk->sol.stat=stat;
+
+    if (stat==SOLQ_FIX) dump_ml_sample(rtk);
 
     return stat!=SOLQ_NONE;
 }
