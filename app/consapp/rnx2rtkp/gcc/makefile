@@ -10,8 +10,12 @@ OPTS    = -DTRACE -DENAGLO -DENAQZS -DENAGAL -DENACMP -DENAIRN -DNFREQ=4 -DNEXOB
 CFLAGS  = -std=c99 -Wall -O3 -pedantic -Wno-unused-but-set-variable -I$(SRC) $(OPTS)
 LDLIBS  = -lgfortran -lm
 
-#CFLAGS  = -std=c99 -Wall -O3 -pedantic -Wno-unused-but-set-variable -I$(SRC) -DLAPACK $(OPTS)
-#LDLIBS  = -lm -lrt -llapack -lblas
+# OpenBLAS / LAPACK acceleration (enable with: make USE_BLAS=1)
+USE_BLAS ?= 0
+ifeq ($(USE_BLAS),1)
+CFLAGS  += -DLAPACK
+LDLIBS  += -lopenblas -lpthread
+endif
 
 # for gprof
 #CFLAGS  = -std=c99 -Wall -O3 -pedantic -Wno-unused-but-set-variable -I$(SRC) -DLAPACK $(OPTS) -pg

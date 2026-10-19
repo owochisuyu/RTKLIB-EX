@@ -10,6 +10,13 @@ CFLAGS = -std=c99 -Wall -O3 -pedantic -Wno-unused-but-set-variable -I$(SRC) -I..
 #LDLIBS  = ../../../lib/iers/gcc/iers.a -lm -lrt -lpthread
 LDLIBS = -lm -lpthread
 
+# OpenBLAS / LAPACK acceleration (enable with: make USE_BLAS=1)
+USE_BLAS ?= 0
+ifeq ($(USE_BLAS),1)
+CFLAGS += -DLAPACK
+LDLIBS += -lopenblas
+endif
+
 all        : rtkrcv
 rtkrcv     : rtkrcv.o vt.o rtkcmn.o trace.o rtksvr.o rtkpos.o geoid.o solution.o lambda.o
 rtkrcv     : sbas.o stream.o rcvraw.o rtcm.o preceph.o options.o pntpos.o ppp.o ppp_ar.o
