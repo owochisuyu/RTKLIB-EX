@@ -4319,22 +4319,29 @@ extern int getstapos(const char *file, const char *name, double *r)
 EXPORT int detslp_gf_poly(ssat_t *ssat, int f_idx, double gf, gtime_t time,
                           double thresslip)
 {
-    double dt, dGF, pred = gf, thres = thresslip;
+    double dt, step, dGF, pred = gf, thres = thresslip;
     int m, M;
 
     if (!ssat || f_idx < 0 || f_idx >= NFREQ - 1 || thresslip <= 0.0) return 0;
 
     M = ssat->gf_cnt[f_idx];
 
-    /* check time continuity with last history point */
+    /* Use signed time for prediction, absolute time for noise scaling.
+     * Two observations establish cadence; a steady backward or 30s stream
+     * must not be mistaken for a new arc at every epoch. */
     if (M > 0) {
         dt = timediff(time, ssat->gf_t[f_idx][M - 1]);
-        if (dt <= 0.0 || dt > 15.0) {
-            M = 0; /* large time gap or reversal: reset history */
+        if (dt==0.0) M=0;
+        else if (M>=2) {
+            double prev_dt=timediff(ssat->gf_t[f_idx][M-1],
+                                   ssat->gf_t[f_idx][M-2]);
+            double gap=fmax(15.0,3.0*fabs(prev_dt));
+            if (dt*prev_dt<=0.0||fabs(dt)>gap) M=0;
         }
     } else {
         dt = 0.0;
     }
+    step=fabs(dt);
 
     if (M == 0) {
         /* first epoch: initialize buffer */
@@ -4349,23 +4356,23 @@ EXPORT int detslp_gf_poly(ssat_t *ssat, int f_idx, double gf, gtime_t time,
         /* constant prediction: without rate information, allow up to nominal storm drift (0.10m/s)
          * while keeping threshold below 1-cycle slip (0.19m) */
         pred = ssat->gf_hist[f_idx][0];
-        thres = (thresslip > 0.10 ? thresslip : 0.10) * sqrt(dt > 1.0 ? dt : 1.0);
+        thres = (thresslip > 0.10 ? thresslip : 0.10) * sqrt(step > 1.0 ? step : 1.0);
     }
     else if (M == 2) {
         /* linear extrapolation */
         double dt01 = timediff(ssat->gf_t[f_idx][1], ssat->gf_t[f_idx][0]);
-        if (dt01 > 0.001) {
+        if (fabs(dt01) > 0.001) {
             double rate = (ssat->gf_hist[f_idx][1] - ssat->gf_hist[f_idx][0]) / dt01;
             pred = ssat->gf_hist[f_idx][1] + rate * dt;
         } else {
             pred = ssat->gf_hist[f_idx][1];
         }
-        thres = (thresslip > 0.05 ? thresslip : 0.05) * sqrt(dt > 1.0 ? dt : 1.0);
+        thres = (thresslip > 0.05 ? thresslip : 0.05) * sqrt(step > 1.0 ? step : 1.0);
     }
     else {
         /* quadratic polynomial fitting: y(tau) = c0 + c1*tau + c2*tau^2
-         * tau is time relative to the last historical point (tau <= 0),
-         * current point is at tau = dt > 0. */
+         * tau and dt are signed times relative to the last history point,
+         * supporting both processing directions. */
         double tau[MAX_GF_HIST], y[MAX_GF_HIST];
         double S0 = 0.0, S1 = 0.0, S2 = 0.0, S3 = 0.0, S4 = 0.0;
         double B0 = 0.0, B1 = 0.0, B2 = 0.0;
@@ -4403,17 +4410,17 @@ EXPORT int detslp_gf_poly(ssat_t *ssat, int f_idx, double gf, gtime_t time,
 
             /* adaptive threshold: scales with fit variance and time interval */
             double adapt_sig = 3.5 * sig_fit;
-            thres = (adapt_sig > thresslip ? adapt_sig : thresslip) * sqrt(dt > 1.0 ? dt : 1.0);
+            thres = (adapt_sig > thresslip ? adapt_sig : thresslip) * sqrt(step > 1.0 ? step : 1.0);
         } else {
             /* fallback to linear */
             double dt01 = timediff(ssat->gf_t[f_idx][M - 1], ssat->gf_t[f_idx][M - 2]);
-            if (dt01 > 0.001) {
+            if (fabs(dt01) > 0.001) {
                 double rate = (ssat->gf_hist[f_idx][M - 1] - ssat->gf_hist[f_idx][M - 2]) / dt01;
                 pred = ssat->gf_hist[f_idx][M - 1] + rate * dt;
             } else {
                 pred = ssat->gf_hist[f_idx][M - 1];
             }
-            thres = (thresslip > 0.05 ? thresslip : 0.05) * sqrt(dt > 1.0 ? dt : 1.0);
+            thres = (thresslip > 0.05 ? thresslip : 0.05) * sqrt(step > 1.0 ? step : 1.0);
         }
     }
 

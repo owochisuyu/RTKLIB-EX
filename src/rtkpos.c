@@ -915,14 +915,39 @@ static void detslp_dop(rtk_t *rtk, const obsd_t *obs, const int *ix, int ns,
         }
     }
 }
+/* Common phase availability is independent of posterior residual validation.
+ * Code measurements need not be present to retain an existing phase arc. */
+static int common_phase(const obsd_t *rov, const obsd_t *base, int f,
+                        const nav_t *nav)
+{
+    double fr,fb;
+    if (!isfinite(rov->L[f])||!isfinite(base->L[f])||
+        rov->L[f]==0.0||base->L[f]==0.0) return 0;
+    fr=sat2freq(rov->sat,rov->code[f],nav);
+    fb=sat2freq(base->sat,base->code[f],nav);
+    return fr>0.0&&fr==fb;
+}
 /* temporal update of phase biases -------------------------------------------*/
 static void udbias(rtk_t *rtk, double tt, const obsd_t *obs, const int *sat,
                    const int *iu, const int *ir, int ns, const nav_t *nav)
 {
     double cp,pr,cp1,cp2,pr1,pr2,*bias,offset,freqi,freq1,freq2,C1,C2;
     int i,j,k,slip,rejc,reset,nf=NF(&rtk->opt),f2;
+    int present[MAXSAT][NFREQ]={{0}};
+    uint32_t outage;
 
     trace(3,"udbias  : tt=%.3f ns=%d\n",tt,ns);
+
+    /* Count missing common phase epochs, not rejected solution epochs. IFLC
+     * has one ambiguity state and requires both constituent frequencies.
+     * Availability does not suppress the independent slip/rejection resets. */
+    for (i=0;i<ns;i++) for (k=0;k<nf;k++) {
+        present[sat[i]-1][k]=common_phase(obs+iu[i],obs+ir[i],k,nav);
+        if (rtk->opt.ionoopt==IONOOPT_IFLC) {
+            f2=seliflc(rtk->opt.nf,rtk->ssat[sat[i]-1].sys);
+            present[sat[i]-1][k]&=common_phase(obs+iu[i],obs+ir[i],f2,nav);
+        }
+    }
 
     /* clear cycle slips */
     for (i=0;i<ns;i++) {
@@ -956,16 +981,21 @@ static void udbias(rtk_t *rtk, double tt, const obsd_t *obs, const int *sat,
         /* reset phase-bias if instantaneous AR or expire obs outage counter */
         for (i=1;i<=MAXSAT;i++) {
 
-            reset=++rtk->ssat[i-1].outc[k]>(uint32_t)rtk->opt.maxout;
+            /* Check elapsed epochs before clearing a returning observation:
+             * retain the existing maxout boundary on real gap/reacquisition.
+             * A continuously observed but rejected epoch has outc==0. */
+            outage=rtk->ssat[i-1].outc[k];
+            if (outage<UINT32_MAX) outage++;
+            reset=outage>(uint32_t)rtk->opt.maxout;
+            rtk->ssat[i-1].outc[k]=present[i-1][k]?0:outage;
 
             if (rtk->opt.modear==ARMODE_INST&&rtk->x[IB(i,k,&rtk->opt)]!=0.0) {
                 initx(rtk,0.0,0.0,IB(i,k,&rtk->opt));
             }
             else if (reset&&rtk->x[IB(i,k,&rtk->opt)]!=0.0) {
                 initx(rtk,0.0,0.0,IB(i,k,&rtk->opt));
-                trace(3,"udbias : obs outage counter overflow (sat=%3d L%d n=%d)\n",
-                      i,k+1,rtk->ssat[i-1].outc[k]);
-                rtk->ssat[i-1].outc[k]=0;
+                trace(3,"udbias : obs outage counter overflow (sat=%3d L%d n=%u)\n",
+                      i,k+1,outage);
             }
             if (rtk->opt.modear!=ARMODE_INST&&reset) {
                 rtk->ssat[i-1].lock[k]=-rtk->opt.minlock;
@@ -1724,33 +1754,29 @@ static int ddidx(rtk_t *rtk, int *ix, int gps, int glo, int sbs)
     }
     return nb;
 }
-/* translate double diff fixed phase-bias values to single diff fix phase-bias values */
-static void restamb(rtk_t *rtk, const double *bias, int nb, double *xa)
+/* build the fully conditioned fixed-solution state vector -------------------
+ * Non-bias states rtk->xa are already conditioned by the caller
+ * (xa_a = x_a - Qab*db). Every still-floating phase-bias state i in [na,nx)
+ * (unselected ambiguities, e.g. GLONASS with AR off, and reference sats) is
+ * conditioned through its full cross covariance with the fixed DDs:
+ *     xa[i] = x[i] - sum_j (P[i,ref_j]-P[i,tgt_j]) * db[j]
+ * with db = (D P D')^-1 (y - b) precomputed by the caller. Selected DDs are
+ * then enforced to exact integers. The float filter is not modified. */
+static void restamb(const rtk_t *rtk, const double *bias, const double *db,
+                    const int *ix, int m, double *xa)
 {
-    (void)nb;
-    int i,n,m,f,index[MAXSAT]={0},nv=0,nf=NF(&rtk->opt);
+    int i,j,na=rtk->na,nx=rtk->nx;
 
-    trace(3,"restamb :\n");
+    trace(3,"restamb : m=%d\n",m);
 
-    for (i=0;i<rtk->nx;i++) xa[i]=rtk->x [i];  /* init all fixed states to float state values */
-    for (i=0;i<rtk->na;i++) xa[i]=rtk->xa[i];  /* overwrite non phase-bias states with fixed values */
-
-    for (m=0;m<6;m++) for (f=0;f<nf;f++) {
-
-        for (n=i=0;i<MAXSAT;i++) {
-            if (!test_sys(rtk->ssat[i].sys,m)||rtk->ssat[i].fix[f]!=2) {
-                continue;
-            }
-            index[n++]=IB(i+1,f,&rtk->opt);
-        }
-        if (n<2) continue;
-
-        xa[index[0]]=rtk->x[index[0]];
-
-        for (i=1;i<n;i++) {
-            xa[index[i]]=xa[index[0]]-bias[nv++];
+    for (i=0;i<na;i++) xa[i]=rtk->xa[i];  /* conditioned non phase-bias states */
+    for (i=na;i<nx;i++) {  /* condition still-floating phase-bias states */
+        xa[i]=rtk->x[i];
+        for (j=0;j<m;j++) {
+            xa[i]-=(rtk->P[i+ix[2*j]*nx]-rtk->P[i+ix[2*j+1]*nx])*db[j];
         }
     }
+    for (j=0;j<m;j++) xa[ix[2*j+1]]=xa[ix[2*j]]-bias[j];  /* exact integer DDs */
 }
 /* hold integer ambiguity ----------------------------------------------------*/
 static void holdamb(rtk_t *rtk, const double *xa)
@@ -1886,7 +1912,7 @@ static int solve_PAR(rtk_t *rtk, double *bias, double *xa, int nb, const int *ix
     int na = rtk->na, nx = rtk->nx;
     int minamb = opt->par_minamb > 0 ? opt->par_minamb : 4;
     int m, i, j, k, info, best_m = 0, sat, f;
-    int *order, *in_sub;
+    int *order, *in_sub, *selix;
     double *vars, *y_sub, *Qb_sub, *Qab_sub, *b_sub, *db_sub, *QQ_sub, *dy_sub, s_sub[2];
     double pf_upper_sub = NAN, mu_sub = NAN, thres_sub = 0.0;
     int accepted_sub = 0;
@@ -1898,6 +1924,7 @@ static int solve_PAR(rtk_t *rtk, double *bias, double *xa, int nb, const int *ix
 
     order = imat(nb, 1);
     in_sub = imat(nb, 1);
+    selix = imat(2*nb, 1);
     vars = mat(nb, 1);
 
     /* 1. Calculate float variance for each DD ambiguity and sort ascending */
@@ -1988,20 +2015,14 @@ static int solve_PAR(rtk_t *rtk, double *bias, double *xa, int nb, const int *ix
                     matmulm("NT", na, na, m, QQ_sub, Qab_sub, rtk->Pa);
 
                     /* Condition all phase-bias states, including unselected
-                     * ones and references. Keep the float filter untouched.
-                     * restamb() would discard these conditional means. */
-                    for (i=0;i<na;i++) xa[i]=rtk->xa[i];
-                    for (i=na;i<nx;i++) {
-                        xa[i]=rtk->x[i];
-                        for (j=0;j<m;j++) {
-                            int ref=ix[2*order[j]],target=ix[2*order[j]+1];
-                            xa[i]-=(rtk->P[i+ref*nx]-rtk->P[i+target*nx])*db_sub[j];
-                        }
-                    }
-                    /* Enforce selected integer differences to roundoff. */
+                     * ones and references, via the shared helper. Keep the
+                     * float filter untouched. b_sub/db_sub are already in
+                     * subset order. */
                     for (j=0;j<m;j++) {
-                        xa[ix[2*order[j]+1]]=xa[ix[2*order[j]]]-b_sub[j];
+                        selix[2*j]  =ix[2*order[j]];
+                        selix[2*j+1]=ix[2*order[j]+1];
                     }
+                    restamb(rtk,b_sub,db_sub,selix,m,xa);
 
                     /* 4. Update satellite fix flags and ordered bias output */
                     for (i = 0; i < nb; i++) in_sub[i] = 0;
@@ -2074,6 +2095,7 @@ static int solve_PAR(rtk_t *rtk, double *bias, double *xa, int nb, const int *ix
 
     free(order);
     free(in_sub);
+    free(selix);
     free(vars);
 
     return best_m;
@@ -2197,7 +2219,7 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,in
 
                 /* translate double diff fixed phase-bias values to single diff
                 fix phase-bias values, result in xa */
-                restamb(rtk,bias,nb,xa);
+                restamb(rtk,bias,db,ix,nb,xa);
             }
             else nb=0;
         }
@@ -2408,6 +2430,15 @@ static int valpos(rtk_t *rtk, const double *v, const double *R, const int *vflg,
     }
     return stat;
 }
+/* Apply the same epoch-local phase exclusions after every rover zdres(). */
+static void exclude_phase(double *y, const int *sat, const int *iu, int ns,
+                          int nf, const int excluded[MAXSAT][NFREQ])
+{
+    int i,f;
+    for (i=0;i<ns;i++) for (f=0;f<nf;f++) {
+        if (excluded[sat[i]-1][f]) y[f+iu[i]*nf*2]=0.0;
+    }
+}
 /* relpos()relative positioning ------------------------------------------------------
  *  args:  rtk      IO      gps solution structure
            obs      I       satellite observations
@@ -2534,11 +2565,7 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
             }
             /* mask out excluded carrier phase observations for this epoch */
             if (exc_cnt>0) {
-                for (j=0;j<ns;j++) for (f=0;f<nf;f++) {
-                    if (exc_phase[sat[j]-1][f]) {
-                        y[f+iu[j]*nf*2]=0.0;
-                    }
-                }
+                exclude_phase(y,sat,iu,ns,nf,exc_phase);
             }
             /* calculate double-differenced residuals and create state matrix from sat angles
                     O rtk->ssat[i].resp[j] = residual pseudorange error
@@ -2579,11 +2606,7 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
             break;
         }
         if (exc_cnt>0) {
-            for (j=0;j<ns;j++) for (f=0;f<nf;f++) {
-                if (exc_phase[sat[j]-1][f]) {
-                    y[f+iu[j]*nf*2]=0.0;
-                }
-            }
+            exclude_phase(y,sat,iu,ns,nf,exc_phase);
         }
         /* calc double diff residuals again after kalman filter update for float solution */
         nv=ddres(rtk,obs,dt,xp,Pp,sat,y,e,azel,freq,iu,ir,ns,v,NULL,R,vflg,NULL);
@@ -2609,6 +2632,9 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
             continue;
         }
         else {
+            /* No validated posterior: retain the predicted filter state. */
+            errmsg(rtk,"float residual validation failed after FDE\n");
+            stat=SOLQ_NONE;
             break;
         }
     }
@@ -2622,7 +2648,6 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
         rtk->sol.ns=0;
         for (i=0;i<ns;i++) for (f=0;f<nf;f++) {
             if (!rtk->ssat[sat[i]-1].vsat[f]) continue;
-            rtk->ssat[sat[i]-1].outc[f]=0;
             if (f==0) rtk->sol.ns++; /* valid satellite count by L1 */
         }
         /* too few valid phases */
@@ -2636,6 +2661,7 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
 
             /* find zero-diff residuals for fixed solution */
             if (zdres(0,obs,nu,rs,dts,var,svh,nav,xa,opt,y,e,azel,freq)) {
+                if (exc_cnt>0) exclude_phase(y,sat,iu,ns,nf,exc_phase);
 
                 /* post-fit residuals for fixed solution (xa includes fixed phase biases, rtk->xa does not) */
                 nv=ddres(rtk,obs,dt,xa,Pp,sat,y,e,azel,freq,iu,ir,ns,v,NULL,R,vflg,NULL);
@@ -2682,7 +2708,7 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
             rtk->sol.qv[5]=(float)rtk->Pa[5+3*rtk->na];
         }
     }
-    else {  /* float solution */
+    else if (stat!=SOLQ_NONE) {  /* validated float solution */
         for (i=0;i<3;i++) {
             rtk->sol.rr[i]=rtk->x[i];
             rtk->sol.qr[i]=(float)rtk->P[i+i*rtk->nx];
@@ -2701,6 +2727,12 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
             rtk->sol.qv[5]=(float)rtk->P[5+3*rtk->nx];
         }
         rtk->nfix=0;
+    }
+    else {
+        /* Preserve any current-epoch SPP fallback and its covariance.
+         * Rejected measurements must not advance ambiguity lock counters. */
+        rtk->nfix=0;
+        for (i=0;i<MAXSAT;i++) for (j=0;j<nf;j++) rtk->ssat[i].vsat[j]=0;
     }
     trace(3,"sol_rr= ");tracemat(3,rtk->sol.rr,1,6,15,3);
     /* save phase measurements */
@@ -2779,6 +2811,18 @@ extern void rtkfree(rtk_t *rtk)
     free(rtk->P ); rtk->P =NULL;
     free(rtk->xa); rtk->xa=NULL;
     free(rtk->Pa); rtk->Pa=NULL;
+}
+/* Retain only a position/velocity seed after SPP failure or jump rejection.
+ * Old quality flags, satellite counts and covariances are not a new solution. */
+static void spp_fallback(rtk_t *rtk, const sol_t *previous, const obsd_t *obs)
+{
+    sol_t sol={{0}};
+    sol.time=obs->time;
+    sol.eventime=obs->eventime;
+    if (norm(previous->rr,3)>RE_WGS84/2) {
+        memcpy(sol.rr,previous->rr,sizeof(sol.rr));
+    }
+    rtk->sol=sol;
 }
 /* precise positioning ---------------------------------------------------------
 * input observation data and navigation message, compute rover position by
@@ -2876,11 +2920,10 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
         sol_t sol_prev=rtk->sol;
         if (!pntpos(obs,nu,nav,&rtk->opt,&rtk->sol,NULL,rtk->ssat,msg)) {
             errmsg(rtk,"point pos error (%s)\n",msg);
+            spp_fallback(rtk,&sol_prev,obs);
 
-            /* autonomous fault recovery: maintain previous valid position if available */
+            /* Previous coordinates may seed relative positioning only. */
             if (norm(sol_prev.rr,3)>RE_WGS84/2) {
-                rtk->sol=sol_prev;
-                rtk->sol.time=obs[0].time;
                 trace(2,"spp fault recovery: maintain previous position\n");
             }
             else if (!rtk->opt.dynamics) {
@@ -2896,7 +2939,7 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
             double dt=fabs(timediff(rtk->sol.time,sol_prev.time));
             if (dt<10.0&&dr>50.0+10.0*dt) {
                 trace(2,"spp geometric jump rejected: dr=%.2f dt=%.2f > thres, recover previous pos\n",dr,dt);
-                for (i=0;i<3;i++) rtk->sol.rr[i]=sol_prev.rr[i];
+                spp_fallback(rtk,&sol_prev,obs);
             }
         }
     } else rtk->sol.time=obs[0].time;
@@ -2916,7 +2959,7 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
     /* single point positioning */
     if (opt->mode==PMODE_SINGLE) {
         outsolstat(rtk,nav);
-        return 1;
+        return rtk->sol.stat!=SOLQ_NONE;
     }
     /* suppress output of single solution */
     if (!opt->outsingle) {

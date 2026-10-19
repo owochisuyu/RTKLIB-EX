@@ -379,7 +379,10 @@ static int valsol(const double *azel, const int *vsat, int n,
     
     /* 1. Geometric and physical feasibility checks */
     r=norm(rr,3);
-    if (r<RE_WGS84-20000.0||r>RE_WGS84+100000.0) {
+    /* Broad radial guard must include the polar radius and allowed heights.
+     * The latitude-independent feasibility test is ellipsoidal height below. */
+    if (!isfinite(r)||r<RE_WGS84*(1.0-FE_WGS84)-20000.0||
+        r>RE_WGS84+100000.0) {
         sprintf(msg,"unphysical radius r=%.1f",r);
         return 0;
     }
