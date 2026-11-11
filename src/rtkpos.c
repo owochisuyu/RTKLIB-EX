@@ -658,11 +658,25 @@ static void udion(rtk_t *rtk, double tt, double bl, const int *sat, int ns)
             }
         }
 
-        /* Add process noise Q to diagonal: Q_jj = (1 - phi^2) * var */
+        /* Add process noise Q to diagonal: Q_jj = (1 - phi^2) * var + dynamic ROTI adaptation */
         for (i=1;i<=MAXSAT;i++) {
             j=II(i,&rtk->opt);
             if (propagate[i-1]) {
-                rtk->P[j+j*rtk->nx]+=qfactor*var;
+                double q_add = qfactor * var;
+                ssat_t *ss = &rtk->ssat[i-1];
+                if (ss->gf_cnt[0] >= 2 && !(ss->slip[0] & LLI_SLIP) && !(ss->slip[1] & LLI_SLIP)) {
+                    int M = ss->gf_cnt[0];
+                    double dt_gf = timediff(ss->gf_t[0][M-1], ss->gf_t[0][M-2]);
+                    if (fabs(dt_gf) > 0.001) {
+                        double rot_gf = fabs(ss->gf_hist[0][M-1] - ss->gf_hist[0][M-2]) / fabs(dt_gf);
+                        double rot_iono = rot_gf / 0.65; /* slant iono rate in m/s */
+                        if (rot_iono > 0.002) {
+                            q_add += SQR(rot_iono) * fabs(dt);
+                            trace(3,"sat %2d dynamic iono adaptive Q: rot=%.4f m/s q_add=%.6f\n", i, rot_iono, q_add);
+                        }
+                    }
+                }
+                rtk->P[j+j*rtk->nx]+=q_add;
                 /* exp() can underflow after a long gap or very short tau.
                  * Preserve the nonzero activity sentinel used by filter(). */
                 if (rtk->x[j]==0.0) rtk->x[j]=1E-6;
@@ -691,7 +705,21 @@ static void udion(rtk_t *rtk, double tt, double bl, const int *sat, int ns)
             /* elevation dependent factor of process noise */
             el=rtk->ssat[sat[i]-1].azel[1];
             fact=cos(el);
-            rtk->P[j+j*rtk->nx]+=SQR(rtk->opt.prn[1]*bl/1E4*fact)*fabs(tt);
+            double q_sigma = rtk->opt.prn[1]*bl/1E4*fact;
+            ssat_t *ss = &rtk->ssat[sat[i]-1];
+            if (ss->gf_cnt[0] >= 2 && !(ss->slip[0] & LLI_SLIP) && !(ss->slip[1] & LLI_SLIP)) {
+                int M = ss->gf_cnt[0];
+                double dt_gf = timediff(ss->gf_t[0][M-1], ss->gf_t[0][M-2]);
+                if (fabs(dt_gf) > 0.001) {
+                    double rot_gf = fabs(ss->gf_hist[0][M-1] - ss->gf_hist[0][M-2]) / fabs(dt_gf);
+                    double rot_iono = rot_gf / 0.65;
+                    if (rot_iono > q_sigma) {
+                        q_sigma = rot_iono;
+                        trace(3,"sat %2d dynamic est-stec Q: rot=%.4f m/s\n", sat[i], rot_iono);
+                    }
+                }
+            }
+            rtk->P[j+j*rtk->nx]+=SQR(q_sigma)*fabs(tt);
         }
     }
 }
