@@ -478,6 +478,14 @@ static int selsat(const obsd_t *obs, double *azel, int nu, int nr,
         if      (obs[i].sat<obs[j].sat) j--;
         else if (obs[i].sat>obs[j].sat) i--;
         else if (azel[1+j*2]>=opt->elmin) { /* elevation at base station */
+            /* dynamically enforce shared dual-frequency carrier observations */
+            if (opt->nf>=2) {
+                if (obs[i].L[0]==0.0||obs[j].L[0]==0.0||
+                    obs[i].L[1]==0.0||obs[j].L[1]==0.0) {
+                    trace(4,"skip non-dual-freq sat=%3d iu=%2d ir=%2d\n",obs[i].sat,i,j);
+                    continue;
+                }
+            }
             sat[k]=obs[i].sat; iu[k]=i; ir[k++]=j;
             trace(4,"(%2d) sat=%3d iu=%2d ir=%2d\n",k-1,obs[i].sat,i,j);
         }
