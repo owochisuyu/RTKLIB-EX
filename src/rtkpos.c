@@ -2109,6 +2109,202 @@ static int solve_PAR(rtk_t *rtk, double *bias, double *xa, int nb, const int *ix
     return best_m;
 }
 
+
+/* cascaded wide-lane / narrow-lane ambiguity resolution ---------------------*/
+static int solve_cascaded_WLNL(rtk_t *rtk, double *bias, double *xa, int nb,
+                               const int *ix, const double *y_full,
+                               const double *Qb_full, const double *Qab_full)
+{
+    prcopt_t *opt=&rtk->opt;
+    int na=rtk->na, nx=rtk->nx;
+    int i, j, k;
+
+    int pair_f0[MAXSAT], pair_f1[MAXSAT];
+    int m = 0;
+
+    for (i = 0; i < nb; i++) {
+        int f0 = (ix[i*2+1] - na) / MAXSAT;
+        if (f0 != 0) continue;
+        int sat0 = (ix[i*2+1] - na) % MAXSAT + 1;
+        int ref0 = (ix[i*2] - na) % MAXSAT + 1;
+
+        for (j = 0; j < nb; j++) {
+            int f1 = (ix[j*2+1] - na) / MAXSAT;
+            if (f1 != 1) continue;
+            int sat1 = (ix[j*2+1] - na) % MAXSAT + 1;
+            int ref1 = (ix[j*2] - na) % MAXSAT + 1;
+
+            if (sat0 == sat1 && ref0 == ref1) {
+                pair_f0[m] = i;
+                pair_f1[m] = j;
+                m++;
+                break;
+            }
+        }
+    }
+
+    if (m < opt->minfixsats) return 0;
+
+    double *y_wl   = mat(m, 1);
+    double *Qb_wl  = mat(m, m);
+    double *Qab_wl = mat(na, m);
+    double *b_wl   = mat(m, 2);
+    double *s_wl   = mat(2, 1);
+    double *dy_wl  = mat(m, 1);
+    double *db_wl  = mat(m, 1);
+    double *QQ_wl  = mat(na, m);
+
+    for (k = 0; k < m; k++) {
+        int i0 = pair_f0[k];
+        int i1 = pair_f1[k];
+        y_wl[k] = y_full[i0] - y_full[i1];
+
+        for (j = 0; j < na; j++) {
+            Qab_wl[j + k * na] = Qab_full[j + i0 * na] - Qab_full[j + i1 * na];
+        }
+        for (j = 0; j < m; j++) {
+            int j0 = pair_f0[j];
+            int j1 = pair_f1[j];
+            Qb_wl[k + j * m] = Qb_full[i0 + j0 * nb] - Qb_full[i0 + j1 * nb]
+                             - Qb_full[i1 + j0 * nb] + Qb_full[i1 + j1 * nb];
+        }
+    }
+
+    int info = lambda(m, 2, y_wl, Qb_wl, b_wl, s_wl);
+    if (info != 0) {
+        free(y_wl); free(Qb_wl); free(Qab_wl); free(b_wl); free(s_wl);
+        free(dy_wl); free(db_wl); free(QQ_wl);
+        return 0;
+    }
+
+    float ratio_wl = s_wl[0] > 0.0 ? (float)(s_wl[1] / s_wl[0]) : 0.0f;
+    if (ratio_wl > 999.9f) ratio_wl = 999.9f;
+
+    trace(3, "Cascaded WL AR: m=%d ratio=%.2f thres=%.2f s=%.2f/%.2f\n",
+          m, ratio_wl, rtk->sol.thres, s_wl[0], s_wl[1]);
+
+    if (ratio_wl < rtk->sol.thres) {
+        free(y_wl); free(Qb_wl); free(Qab_wl); free(b_wl); free(s_wl);
+        free(dy_wl); free(db_wl); free(QQ_wl);
+        return 0;
+    }
+
+    /* Wide-Lane Validation Passed! */
+    for (k = 0; k < m; k++) dy_wl[k] = y_wl[k] - b_wl[k];
+
+    if (matinv(Qb_wl, m)) {
+        free(y_wl); free(Qb_wl); free(Qab_wl); free(b_wl); free(s_wl);
+        free(dy_wl); free(db_wl); free(QQ_wl);
+        return 0;
+    }
+
+    /* Condition state vector rtk->xa on fixed Wide-Lane integers */
+    for (i = 0; i < na; i++) {
+        rtk->xa[i] = rtk->x[i];
+        for (j = 0; j < na; j++) rtk->Pa[i + j * na] = rtk->P[i + j * nx];
+    }
+    matmul("NN", m, 1, m, Qb_wl, dy_wl, db_wl);
+    matmulm("NN", na, 1, m, Qab_wl, db_wl, rtk->xa);
+    matmul("NN", na, m, m, Qab_wl, Qb_wl, QQ_wl);
+    matmulm("NT", na, na, m, QQ_wl, Qab_wl, rtk->Pa);
+
+    /* Stage 2: Narrow-Lane LAMBDA */
+    double *Qb_Twl = mat(nb, m);
+    for (k = 0; k < m; k++) {
+        int i0 = pair_f0[k];
+        int i1 = pair_f1[k];
+        for (i = 0; i < nb; i++) {
+            Qb_Twl[i + k * nb] = Qb_full[i + i0 * nb] - Qb_full[i + i1 * nb];
+        }
+    }
+    double *y_cond = mat(nb, 1);
+    for (i = 0; i < nb; i++) y_cond[i] = y_full[i];
+    matmulm("NN", nb, 1, m, Qb_Twl, db_wl, y_cond);
+
+    double *QQ_b = mat(nb, m);
+    matmul("NN", nb, m, m, Qb_Twl, Qb_wl, QQ_b);
+    double *Qb_cond = mat(nb, nb);
+    for (i = 0; i < nb * nb; i++) Qb_cond[i] = Qb_full[i];
+    matmulm("NT", nb, nb, m, QQ_b, Qb_Twl, Qb_cond);
+
+    double *y_nl  = mat(m, 1);
+    double *Qb_nl = mat(m, m);
+    double *b_nl  = mat(m, 2);
+    double *s_nl  = mat(2, 1);
+
+    for (k = 0; k < m; k++) {
+        int i0 = pair_f0[k];
+        y_nl[k] = y_cond[i0];
+        for (j = 0; j < m; j++) {
+            int j0 = pair_f0[j];
+            Qb_nl[k + j * m] = Qb_cond[i0 + j0 * nb];
+        }
+    }
+
+    int info_nl = lambda(m, 2, y_nl, Qb_nl, b_nl, s_nl);
+    float ratio_nl = (info_nl == 0 && s_nl[0] > 0.0) ? (float)(s_nl[1] / s_nl[0]) : 0.0f;
+    if (ratio_nl > 999.9f) ratio_nl = 999.9f;
+
+    trace(3, "Cascaded NL AR: m=%d ratio=%.2f thres=%.2f s=%.2f/%.2f\n",
+          m, ratio_nl, rtk->sol.thres, s_nl[0], s_nl[1]);
+
+    int fixed_count = 0;
+    if (info_nl == 0 && ratio_nl >= rtk->sol.thres) {
+        /* Full WL + NL fix! */
+        double *b_full  = mat(nb, 1);
+        double *dy_full = mat(nb, 1);
+        double *db_full = mat(nb, 1);
+        double *Qb_inv  = mat(nb, nb);
+        for (i = 0; i < nb; i++) b_full[i] = y_full[i];
+        for (k = 0; k < m; k++) {
+            int i0 = pair_f0[k];
+            int i1 = pair_f1[k];
+            b_full[i0] = b_nl[k];
+            b_full[i1] = b_nl[k] - b_wl[k];
+        }
+        for (i = 0; i < nb; i++) {
+            bias[i] = b_full[i];
+            dy_full[i] = y_full[i] - b_full[i];
+        }
+        for (i = 0; i < nb * nb; i++) Qb_inv[i] = Qb_full[i];
+        if (!matinv(Qb_inv, nb)) {
+            for (i = 0; i < na; i++) {
+                rtk->xa[i] = rtk->x[i];
+                for (j = 0; j < na; j++) rtk->Pa[i + j * na] = rtk->P[i + j * nx];
+            }
+            matmul("NN", nb, 1, nb, Qb_inv, dy_full, db_full);
+            matmulm("NN", na, 1, nb, Qab_full, db_full, rtk->xa);
+            restamb(rtk, bias, db_full, ix, nb, xa);
+            for (k = 0; k < m; k++) {
+                int sat_idx = (ix[pair_f0[k]*2+1] - na) % MAXSAT;
+                rtk->ssat[sat_idx].fix[0] = 2;
+                rtk->ssat[sat_idx].fix[1] = 2;
+            }
+            rtk->sol.ratio = ratio_nl;
+            fixed_count = nb;
+            trace(2, "Cascaded WL+NL fix successful! ratio=%.2f\n", ratio_nl);
+        }
+        free(b_full); free(dy_full); free(db_full); free(Qb_inv);
+    }
+    else {
+        /* WL-only fixed solution! xa/Pa already conditioned on b_wl */
+        for (k = 0; k < m; k++) {
+            int sat_idx = (ix[pair_f0[k]*2+1] - na) % MAXSAT;
+            rtk->ssat[sat_idx].fix[0] = 2; /* wide-lane fixed */
+        }
+        rtk->sol.ratio = ratio_wl;
+        fixed_count = m;
+        trace(2, "Cascaded WL-only fix successful! ratio=%.2f\n", ratio_wl);
+    }
+
+    free(y_wl); free(Qb_wl); free(Qab_wl); free(b_wl); free(s_wl);
+    free(dy_wl); free(db_wl); free(QQ_wl);
+    free(Qb_Twl); free(y_cond); free(QQ_b); free(Qb_cond);
+    free(y_nl); free(Qb_nl); free(b_nl); free(s_nl);
+
+    return fixed_count;
+}
+
 /* resolve integer ambiguity by LAMBDA ---------------------------------------*/
 static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,int sbs)
 {
@@ -2234,10 +2430,10 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,in
         else { /* validation failed */
             errmsg(rtk,"ambiguity validation failed (nb=%d ratio=%.2f thresh=%.2f s=%.2f/%.2f)\n",
                    nb,s[1]/s[0],rtk->sol.thres,s[0],s[1]);
-            if (opt->par) {
+            nb = solve_cascaded_WLNL(rtk, bias, xa, nb, ix, y, Qb, Qab);
+            if (nb <= 0 && opt->par) {
                 nb = solve_PAR(rtk, bias, xa, nb, ix, y, Qb, Qab);
             }
-            else nb = 0;
         }
     }
     else {
