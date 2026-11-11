@@ -580,6 +580,25 @@ static void udpos(rtk_t *rtk, double tt)
     }
     free(ix); free(F); free(P); free(FP); free(x); free(xp);
 }
+/* compute single-difference ionospheric rate of change (ROT/ROTI) in m/s ----*/
+static double get_sat_roti(const ssat_t *ssat)
+{
+    int M = ssat->gf_cnt[0];
+    if (M < 2) return 0.0;
+    
+    double sum_rot = 0.0;
+    int n = 0;
+    for (int m = 1; m < M; m++) {
+        double dt = timediff(ssat->gf_t[0][m], ssat->gf_t[0][m - 1]);
+        if (fabs(dt) > 0.001) {
+            double rot = fabs(ssat->gf_hist[0][m] - ssat->gf_hist[0][m - 1]) / fabs(dt);
+            sum_rot += rot;
+            n++;
+        }
+    }
+    return n > 0 ? (sum_rot / n) : 0.0;
+}
+
 /* temporal update of ionospheric parameters ---------------------------------*/
 static void udion(rtk_t *rtk, double tt, double bl, const int *sat, int ns)
 {
@@ -658,11 +677,20 @@ static void udion(rtk_t *rtk, double tt, double bl, const int *sat, int ns)
             }
         }
 
-        /* Add process noise Q to diagonal: Q_jj = (1 - phi^2) * var */
+        /* Add process noise Q to diagonal: Q_jj = (1 - phi^2) * sat_var (ROTI-adaptive) */
         for (i=1;i<=MAXSAT;i++) {
             j=II(i,&rtk->opt);
             if (propagate[i-1]) {
-                rtk->P[j+j*rtk->nx]+=qfactor*var;
+                double sat_var = var;
+                double roti = get_sat_roti(&rtk->ssat[i-1]);
+                if (roti > 0.002) {
+                    double scale = 1.0 + SQR(roti / 0.002);
+                    if (scale > 50.0) scale = 50.0;
+                    sat_var *= scale;
+                    trace(4, "sat_roti_iono: sat=%2d roti=%.4f scale=%.2f var=%.6f\n",
+                          i, roti, scale, sat_var);
+                }
+                rtk->P[j+j*rtk->nx]+=qfactor*sat_var;
                 /* exp() can underflow after a long gap or very short tau.
                  * Preserve the nonzero activity sentinel used by filter(). */
                 if (rtk->x[j]==0.0) rtk->x[j]=1E-6;
