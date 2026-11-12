@@ -1748,23 +1748,26 @@ static int ddidx(rtk_t *rtk, int *ix, int gps, int glo, int sbs)
         /* step through freqs */
         for (f=0,k=na;f<nf;f++,k+=MAXSAT) {
 
-            /* look for first valid sat (i=state index, i-k=sat index) */
+            /* look for highest elevation valid sat to serve as double-diff reference */
+            int best_i = -1;
+            double max_el = -1.0;
             for (i=k;i<k+MAXSAT;i++) {
-                /* skip if sat not active */
                 if (rtk->x[i]==0.0||!test_sys(rtk->ssat[i-k].sys,m)||
                     !rtk->ssat[i-k].vsat[f]) {
                     continue;
                 }
-                /* set sat to use for fixing ambiguity if meets criteria */
                 if (rtk->ssat[i-k].lock[f]>=0&&!(rtk->ssat[i-k].slip[f]&LLI_HALFC)&&
                     rtk->ssat[i-k].azel[1]>=rtk->opt.elmaskar&&!nofix) {
-                    rtk->ssat[i-k].fix[f]=2; /* fix */
-                    break;/* break out of loop if find good sat */
+                    if (rtk->ssat[i-k].azel[1] > max_el) {
+                        max_el = rtk->ssat[i-k].azel[1];
+                        best_i = i;
+                    }
                 }
-                /* else don't use this sat for fixing ambiguity */
                 else rtk->ssat[i-k].fix[f]=1;
             }
-            if (i>=k+MAXSAT||rtk->ssat[i-k].fix[f]!=2) continue;  /* no good sat found */
+            if (best_i < 0) continue;  /* no good sat found */
+            i = best_i;
+            rtk->ssat[i-k].fix[f]=2; /* mark reference sat for fix */
             /* step through all sats (j=state index, j-k=sat index, i-k=first good sat) */
             for (n=0,j=k;j<k+MAXSAT;j++) {
                 if (i==j||rtk->x[j]==0.0||!test_sys(rtk->ssat[j-k].sys,m)||
@@ -2904,7 +2907,7 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
                 nv=ddres(rtk,obs,dt,xa,Pp,sat,y,e,azel,freq,iu,ir,ns,v,NULL,R,vflg,NULL);
 
                 /* validation of fixed solution */
-                if (valpos(rtk,v,R,vflg,nv,4.0,NULL,NULL)) {
+                if (valpos(rtk,v,R,vflg,nv,5.0,NULL,NULL)) {
 
                     /* hold integer ambiguity if meet minfix count */
                     if (++rtk->nfix>=rtk->opt.minfix) {
