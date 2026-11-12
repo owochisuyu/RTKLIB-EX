@@ -402,6 +402,20 @@ static double gfobs(const obsd_t *obs, int i, int j, int k, const nav_t *nav)
     if (freq1==0.0||freq2==0.0||L1==0.0||L2==0.0) return 0.0;
     return L1*CLIGHT/freq1-L2*CLIGHT/freq2;
 }
+/* single-differenced Melbourne-Wubbena linear combination (m) ----------------*/
+static double sdmw(const obsd_t *obs, int i, int j, int k, const nav_t *nav)
+{
+    double freq1,freq2,L1,L2,P1,P2;
+
+    freq1=sat2freq(obs[i].sat,obs[i].code[0],nav);
+    freq2=sat2freq(obs[i].sat,obs[i].code[k],nav);
+    L1=sdobs(obs,i,j,0);
+    L2=sdobs(obs,i,j,k);
+    P1=sdobs(obs,i,j,NFREQ);
+    P2=sdobs(obs,i,j,NFREQ+k);
+    if (freq1<=0.0||freq2<=0.0||L1==0.0||L2==0.0||P1==0.0||P2==0.0) return 0.0;
+    return (L1-L2)*CLIGHT/(freq1-freq2)-(freq1*P1+freq2*P2)/(freq1+freq2);
+}
 /* single-differenced measurement error variance -----------------------------*/
 static double varerr(int sat, int sys, double el, double snr_rover, double snr_base,
                      double bl, double dt, int f, const prcopt_t *opt, const obsd_t *obs)
@@ -843,11 +857,33 @@ static void detslp_gf(rtk_t *rtk, const obsd_t *obs, int i, int j,
             continue;
         }
 
+        double mw1=sdmw(obs,i,j,k,nav);
+        double mw0=rtk->ssat[sat-1].mw[k-1];
+        if (mw1!=0.0) {
+            rtk->ssat[sat-1].mw[k-1]=mw1;
+        }
+
         if (detslp_gf_poly(&rtk->ssat[sat-1], k-1, gf1, obs[i].time, rtk->opt.thresslip)) {
-            rtk->ssat[sat-1].slip[0]|=LLI_SLIP;
-            rtk->ssat[sat-1].slip[k]|=LLI_SLIP;
-            errmsg(rtk,"slip detected GF jump (sat=%2d L1-L%d GF=%.3f)\n",
-                sat,k+1,gf1);
+            int slip_confirmed=1;
+            /* Melbourne-Wubbena (MW) dual-arbitration:
+             * MW is 100% ionosphere-free. If MW is smooth (dmw < 0.42m, < 0.5 cycle WL)
+             * and receiver tracking loop has not lost lock (LLI == 0), the GF jump is an
+             * ionospheric scintillation/gradient transient rather than a true integer slip! */
+            if (mw0!=0.0&&mw1!=0.0) {
+                double dmw=fabs(mw1-mw0);
+                int lli=(obs[i].LLI[0]|obs[i].LLI[k]|obs[j].LLI[0]|obs[j].LLI[k]);
+                if (dmw<0.42&&!(lli&LLI_SLIP)) {
+                    slip_confirmed=0;
+                    trace(3,"detslp_gf: sat=%2d L1-L%d GF jump suppressed by smooth MW (dGF=%.3f dMW=%.3f)\n",
+                          sat,k+1,gf1,dmw);
+                }
+            }
+            if (slip_confirmed) {
+                rtk->ssat[sat-1].slip[0]|=LLI_SLIP;
+                rtk->ssat[sat-1].slip[k]|=LLI_SLIP;
+                errmsg(rtk,"slip detected GF jump (sat=%2d L1-L%d GF=%.3f)\n",
+                    sat,k+1,gf1);
+            }
         }
     }
 }
