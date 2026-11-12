@@ -2183,7 +2183,8 @@ static int solve_cascaded_WLNL(rtk_t *rtk, double *bias, double *xa, int nb,
     trace(3, "Cascaded WL AR: m=%d ratio=%.2f thres=%.2f s=%.2f/%.2f\n",
           m, ratio_wl, rtk->sol.thres, s_wl[0], s_wl[1]);
 
-    if (ratio_wl < rtk->sol.thres) {
+    float thres_wl = 1.05f;
+    if (ratio_wl < thres_wl) {
         free(y_wl); free(Qb_wl); free(Qab_wl); free(b_wl); free(s_wl);
         free(dy_wl); free(db_wl); free(QQ_wl);
         return 0;
@@ -2287,14 +2288,10 @@ static int solve_cascaded_WLNL(rtk_t *rtk, double *bias, double *xa, int nb,
         free(b_full); free(dy_full); free(db_full); free(Qb_inv);
     }
     else {
-        /* WL-only fixed solution! xa/Pa already conditioned on b_wl */
-        for (k = 0; k < m; k++) {
-            int sat_idx = (ix[pair_f0[k]*2+1] - na) % MAXSAT;
-            rtk->ssat[sat_idx].fix[0] = 2; /* wide-lane fixed */
-        }
-        rtk->sol.ratio = ratio_wl;
-        fixed_count = m;
-        trace(2, "Cascaded WL-only fix successful! ratio=%.2f\n", ratio_wl);
+        /* Narrow-Lane validation failed: reject integer fix to guarantee cm-level integrity! */
+        fixed_count = 0;
+        trace(2, "Cascaded NL validation failed (ratio=%.2f < thres=%.2f)\n",
+              ratio_nl, rtk->sol.thres);
     }
 
     free(y_wl); free(Qb_wl); free(Qab_wl); free(b_wl); free(s_wl);
