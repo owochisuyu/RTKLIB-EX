@@ -1,3 +1,4 @@
+#include "py_ar_hook.h"
 /*------------------------------------------------------------------------------
 * rtkpos.c : precise positioning
 *
@@ -2414,15 +2415,50 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,in
         rtk->sol.ratio=s[0]>0?(float)(s[1]/s[0]):0.0f;
         if (rtk->sol.ratio>999.9) rtk->sol.ratio=999.9f;
 
-        /* adjust AR ratio based on # of sats, unless minAR==maxAR */
-        if (opt->ar_test) {
+        if (py_ar_is_active()) {
+            /* 1. Calculate PDOP from satellites used in AR */
+            double dop[4] = {0}, azel[2*MAXSAT];
+            int nsat = 0;
+            for (i = 0; i < MAXSAT; i++) {
+                if (!rtk->ssat[i].vs) continue;
+                azel[2*nsat  ] = rtk->ssat[i].azel[0];
+                azel[2*nsat+1] = rtk->ssat[i].azel[1];
+                nsat++;
+            }
+            if (nsat >= 4) dops(nsat, azel, 0.0, dop);
+
+            /* 2. Calculate baseline length in km */
+            double blen_km = 0.0, dr[3];
+            if (norm(rtk->x, 3) > 1e6 && norm(rtk->rb, 3) > 1e6) {
+                for (i = 0; i < 3; i++) dr[i] = rtk->x[i] - rtk->rb[i];
+                blen_km = norm(dr, 3) / 1000.0;
+            }
+
+            /* 3. Prepare 6 features: ratio, lasting_epochs, blen_km, amb_dim, pdop, vtec */
+            double feat[6];
+            feat[0] = s[0] > 0.0 ? (s[1] / s[0]) : 0.0;
+            feat[1] = (double)(rtk->epoch + 1);
+            feat[2] = blen_km;
+            feat[3] = (double)nb;
+            feat[4] = dop[1]; /* PDOP */
+            
+            const char *env_vtec = getenv("RTK_ROVER_VTEC");
+            feat[5] = (env_vtec && *env_vtec) ? atof(env_vtec) : 10.0;
+
+            /* 4. Live C-Py-C Hook Call */
+            accepted = py_ar_evaluate(feat, 6);
+            trace(2, "PY_AR_HOOK: ratio=%.3f ep=%d blen=%.2f nb=%d pdop=%.2f vtec=%.1f -> accepted=%d\n",
+                  feat[0], (int)feat[1], feat[2], (int)feat[3], feat[4], feat[5], accepted);
+        }
+        else if (opt->ar_test) {
             mu=opt->ar_test==1?ffrt_mu(opt->ffrt_pf,pf_upper,nb):NAN;
             rtk->sol.thres=isfinite(mu)&&mu>0.0?(float)(1.0/mu):INFINITY;
+            accepted = ffrt_accept(s[0],s[1],mu);
         }
-        else rtk->sol.thres=ar_ratio_threshold(opt,nb);
-        /* validation by popular ratio-test of residuals*/
-        accepted=opt->ar_test?ffrt_accept(s[0],s[1],mu):
-                            (s[0]<=0.0||s[1]/s[0]>=rtk->sol.thres);
+        else {
+            rtk->sol.thres=ar_ratio_threshold(opt,nb);
+            accepted = (s[0]<=0.0||s[1]/s[0]>=rtk->sol.thres);
+        }
         if (opt->ar_test) {
             trace(2,"FFRT time=%s n=%d pf_tol=%.9g pf_ils_upper=%.12g mu=%.12g ratio=%.12g threshold=%.12g accepted=%d\n",
                   time2str(rtk->sol.time,ffrt_time,3),nb,opt->ffrt_pf,pf_upper,mu,
@@ -2466,9 +2502,13 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,in
         else { /* validation failed */
             errmsg(rtk,"ambiguity validation failed (nb=%d ratio=%.2f thresh=%.2f s=%.2f/%.2f)\n",
                    nb,s[1]/s[0],rtk->sol.thres,s[0],s[1]);
-            nb = solve_cascaded_WLNL(rtk, bias, xa, nb, ix, y, Qb, Qab);
-            if (nb <= 0 && opt->par) {
-                nb = solve_PAR(rtk, bias, xa, nb, ix, y, Qb, Qab);
+            if (py_ar_is_active()) {
+                nb = 0; /* Strict fallback to pure float solution when ML rejects fix */
+            } else {
+                nb = solve_cascaded_WLNL(rtk, bias, xa, nb, ix, y, Qb, Qab);
+                if (nb <= 0 && opt->par) {
+                    nb = solve_PAR(rtk, bias, xa, nb, ix, y, Qb, Qab);
+                }
             }
         }
     }

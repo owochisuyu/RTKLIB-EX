@@ -10,6 +10,13 @@ OPTS    = -DTRACE -DENAGLO -DENAQZS -DENAGAL -DENACMP -DENAIRN -DNFREQ=4 -DNEXOB
 CFLAGS  = -std=c99 -Wall -O3 -pedantic -Wno-unused-but-set-variable -I$(SRC) $(OPTS)
 LDLIBS  = -lgfortran -lm
 
+# Embedded Python 3.10 support
+PY_CFLAGS = $(shell python3-config --cflags --embed)
+PY_LDFLAGS = $(shell python3-config --ldflags --embed)
+CFLAGS += $(PY_CFLAGS)
+LDLIBS += $(PY_LDFLAGS)
+
+
 # OpenBLAS / LAPACK acceleration (enable with: make USE_BLAS=1)
 USE_BLAS ?= 0
 ifeq ($(USE_BLAS),1)
@@ -31,7 +38,7 @@ all        : rnx2rtkp
 rnx2rtkp   : rnx2rtkp.o rtkcmn.o trace.o rinex.o rtkpos.o postpos.o solution.o
 rnx2rtkp   : lambda.o geoid.o sbas.o preceph.o pntpos.o ephemeris.o options.o
 rnx2rtkp   : ppp.o ppp_ar.o rtcm.o rtcm2.o rtcm3.o rtcm3e.o ionex.o tides.o ffrt.o
-rnx2rtkp   : sofa.o
+rnx2rtkp   : sofa.o py_ar_hook.o
 
 rnx2rtkp.o : ../rnx2rtkp.c
 	$(CC) -c $(CFLAGS) ../rnx2rtkp.c
@@ -174,3 +181,6 @@ prof :
 
 install :
 	cp rnx2rtkp $(BINDIR)
+
+py_ar_hook.o : $(SRC)/py_ar_hook.c
+	$(CC) -c $(CFLAGS) $(SRC)/py_ar_hook.c

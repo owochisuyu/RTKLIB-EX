@@ -1,3 +1,4 @@
+#include "py_ar_hook.h"
 /*------------------------------------------------------------------------------
 * rnx2rtkp.c : read rinex obs/nav files and compute receiver positions
 *
@@ -205,7 +206,9 @@ int main(int argc, char **argv)
         traceopen(filopt.trace);
         tracelevel(solopt.trace);
     }
+        py_ar_init(NULL, NULL);
     ret=postpos(ts,te,tint,0.0,&prcopt,&solopt,&filopt,infile,n,outfile,rover,base);
+    py_ar_cleanup();
 
     if (!ret) fprintf(stderr,"%40s\r","");
     return ret?EXIT_FAILURE:0;
