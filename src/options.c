@@ -92,7 +92,6 @@ EXPORT opt_t sysopts[]={
     {"pos2-armode",     3,  (void *)&prcopt_.modear,     ARMOPT },
     {"pos2-gloarmode",  3,  (void *)&prcopt_.glomodear,  GAROPT },
     {"pos2-bdsarmode",  3,  (void *)&prcopt_.bdsmodear,  SWTOPT },
-    {"pos2-arfilter",   3,  (void *)&prcopt_.arfilter,   SWTOPT },
     {"pos2-artest",     3,  (void *)&prcopt_.ar_test,    "0:ratio,1:ffrt"},
     {"pos2-ffrtpf",     1,  (void *)&prcopt_.ffrt_pf,    "0.01 or 0.001"},
     {"pos2-par",        3,  (void *)&prcopt_.par,        SWTOPT },

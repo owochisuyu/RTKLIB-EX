@@ -1006,7 +1006,7 @@ int __fastcall TMainForm::GetOption(prcopt_t &prcopt, solopt_t &solopt,
     prcopt.minfixsats=MinFixSats;
     prcopt.minholdsats=MinHoldSats;
     prcopt.mindropsats=MinDropSats;
-    prcopt.arfilter=ARFilter;
+    /* [arfilter removed] */ // prcopt.arfilter=ARFilter;
     prcopt.intpref  =IntpRefObs;
     prcopt.sbassatsel=SbasSat;
     prcopt.eratio[0]=MeasErrR1;

@@ -2488,7 +2488,7 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,in
 /* resolve integer ambiguity by LAMBDA using partial fix techniques and multiple attempts -----------------------*/
 static int manage_amb_LAMBDA(rtk_t *rtk, double *bias, double *xa, const int *sat, int nf, int ns)
 {
-    int gps1=-1,glo1=-1,sbas1=-1,gps2,glo2,sbas2,nb,rerun,dly;
+    int gps1=-1,glo1=-1,sbas1=-1,gps2,glo2,sbas2,nb;
 
     /* calc position variance, will skip AR if too high to avoid false fix */
     double posvar = 0;
@@ -2563,33 +2563,7 @@ static int manage_amb_LAMBDA(rtk_t *rtk, double *bias, double *xa, const int *sa
     /* first attempt to resolve ambiguities */
     nb=resamb_LAMBDA(rtk,bias,xa,gps1,glo1,sbas1);
     float ratio1=rtk->sol.ratio;
-    /* reject bad satellites if AR filtering enabled */
-    if (rtk->opt.arfilter) {
-        rerun=0;
-        /* if results are much poorer than previous epoch or dropped below ar ratio thresh, remove new sats */
-        if (nb>=0 && rtk->sol.prev_ratio2>=rtk->sol.thres && ((rtk->sol.ratio<rtk->sol.thres) ||
-            (rtk->sol.ratio<rtk->opt.thresar[0]*1.1 && rtk->sol.ratio<rtk->sol.prev_ratio1/2.0))) {
-            trace(3,"low ratio: check for new sat\n");
-            dly=2;
-            for (int i=0;i<ns;i++) for (int f=0;f<nf;f++) {
-                if (rtk->ssat[sat[i]-1].fix[f]!=2) continue;
-                /* check for new sats */
-                if (rtk->ssat[sat[i]-1].lock[f]==0) {
-                    trace(3,"remove sat %d:%d lock=%d\n",sat[i],f,rtk->ssat[sat[i]-1].lock[f]);
-                    rtk->ssat[sat[i]-1].lock[f]=-rtk->opt.minlock-dly;  /* delay use of this sat with stagger */
-                    dly+=2;  /* stagger next try of new sats */
-                    rerun=1;
-                }
-            }
-        }
-        /* rerun if filter removed any sats */
-        if (rerun) {
-            trace(3,"rerun AR with new sats removed\n");
-            /* try again with new sats removed */
-            nb=resamb_LAMBDA(rtk,bias,xa,gps1,glo1,sbas1);
-        }
-    }
-    rtk->sol.prev_ratio1=ratio1;
+        rtk->sol.prev_ratio1=ratio1;
 
 
     /* if fix-and-hold gloarmode enabled, re-run AR with final gps/glo settings if differ from above */

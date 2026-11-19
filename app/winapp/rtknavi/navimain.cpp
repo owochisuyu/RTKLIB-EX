@@ -2557,7 +2557,7 @@ void __fastcall TMainForm::LoadOpt(void)
     PrcOpt.varholdamb=ini->ReadFloat ("prcopt", "varholdamb",     0.1);
     PrcOpt.gainholdamb=ini->ReadFloat("prcopt", "gainholdamb",   0.01);
     PrcOpt.syncsol  =ini->ReadInteger("prcopt", "syncsol",          0);
-    PrcOpt.arfilter =ini->ReadInteger("prcopt", "arfilter",         1);
+    /* [arfilter removed] */ // PrcOpt.arfilter =ini->ReadInteger("prcopt", "arfilter",         1);
     ExSats          =ini->ReadString ("prcopt", "exsats",          "");
     PrcOpt.navsys   =ini->ReadInteger("prcopt", "navsys",SYS_GPS|SYS_GLO|SYS_GAL|SYS_QZS|SYS_CMP);
     PrcOpt.posopt[0]=ini->ReadInteger("prcopt", "posopt1",         0);
@@ -2827,7 +2827,7 @@ void __fastcall TMainForm::SaveOpt(void)
     ini->WriteFloat  ("prcopt", "varholdamb", PrcOpt.varholdamb  );
     ini->WriteFloat  ("prcopt", "gainholdamb",PrcOpt.gainholdamb );
     ini->WriteInteger("prcopt", "syncsol",    PrcOpt.syncsol     );
-    ini->WriteInteger("prcopt", "arfilter",   PrcOpt.arfilter    );
+    /* [arfilter removed] */ // ini->WriteInteger("prcopt", "arfilter",   PrcOpt.arfilter    );
     ini->WriteString ("prcopt", "exsats",     ExSats             );
     ini->WriteInteger("prcopt", "navsys",     PrcOpt.navsys      );
     ini->WriteInteger("prcopt", "posopt1",    PrcOpt.posopt[0]   );

@@ -712,7 +712,7 @@ void OptDialog::updateOptions()
     processingOptions.modear = ui->cBAmbiguityResolution->currentIndex();
     processingOptions.glomodear = ui->cBAmbiguityResolutionGLO->currentIndex();
     processingOptions.bdsmodear = ui->cBAmbiguityResolutionBDS->currentIndex();
-    processingOptions.arfilter = ui->cBARFilter->currentIndex();
+    /* [arfilter removed] */ // processingOptions.arfilter = ui->cBARFilter->currentIndex();
     processingOptions.maxout = ui->sBOutageCountResetAmbiguity->value();
     processingOptions.minlock = ui->sBLockCountFixAmbiguity->value();
     processingOptions.minfixsats = ui->sBMinFixSats->value();
@@ -940,7 +940,7 @@ void OptDialog::updateUi(const prcopt_t &prcopt, const solopt_t &solopt, const f
     ui->cBAmbiguityResolution->setCurrentIndex(prcopt.modear);
     ui->cBAmbiguityResolutionGLO->setCurrentIndex(prcopt.glomodear);
     ui->cBAmbiguityResolutionBDS->setCurrentIndex(prcopt.bdsmodear);
-    ui->cBARFilter->setCurrentIndex(prcopt.arfilter);
+    /* [arfilter removed] */ // ui->cBARFilter->setCurrentIndex(prcopt.arfilter);
     ui->sBOutageCountResetAmbiguity->setValue(prcopt.maxout);
     ui->sBLockCountFixAmbiguity->setValue(prcopt.minlock);
     ui->sBMinFixSats->setValue(prcopt.minfixsats);
@@ -1139,7 +1139,7 @@ void OptDialog::save(const QString &file)
     procOpts.modear = ui->cBAmbiguityResolution->currentIndex();
     procOpts.glomodear = ui->cBAmbiguityResolutionGLO->currentIndex();
     procOpts.bdsmodear = ui->cBAmbiguityResolutionBDS->currentIndex();
-    procOpts.arfilter = ui->cBARFilter->currentIndex();
+    /* [arfilter removed] */ // procOpts.arfilter = ui->cBARFilter->currentIndex();
     procOpts.maxout = ui->sBOutageCountResetAmbiguity->value();
     procOpts.minlock = ui->sBLockCountFixAmbiguity->value();
     procOpts.minfixsats = ui->sBMinFixSats->value();

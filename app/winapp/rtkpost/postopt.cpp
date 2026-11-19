@@ -685,7 +685,7 @@ void __fastcall TOptDialog::LoadOpt(AnsiString file)
 	MinFixSats	 ->Text			=s.sprintf("%d",  prcopt.minfixsats);
 	MinHoldSats	 ->Text			=s.sprintf("%d",  prcopt.minholdsats);
 	MinDropSats	 ->Text			=s.sprintf("%d",  prcopt.mindropsats);
-	ARFilter	 ->ItemIndex	=prcopt.arfilter;
+    /* [arfilter removed] */ // ARFilter	 ->ItemIndex	=prcopt.arfilter;
 	NumIter		 ->Text			=s.sprintf("%d",  prcopt.niter    );
 	BaselineLen	 ->Text			=s.sprintf("%.3f",prcopt.baseline[0]);
 	BaselineSig	 ->Text			=s.sprintf("%.3f",prcopt.baseline[1]);
@@ -848,7 +848,7 @@ int ppp=PosMode->ItemIndex>=PMODE_PPP_KINEMA;
 	prcopt.minfixsats=str2dbl(MinFixSats->Text);
 	prcopt.minholdsats=str2dbl(MinHoldSats->Text);
 	prcopt.mindropsats=str2dbl(MinDropSats->Text);
-	prcopt.arfilter	=ARFilter->ItemIndex;
+    /* [arfilter removed] */ // prcopt.arfilter	=ARFilter->ItemIndex;
 	prcopt.niter	=str2dbl(NumIter	->Text);
 	if (BaselineConst->Checked) {
 		prcopt.baseline[0]=str2dbl(BaselineLen->Text);
