@@ -2381,6 +2381,149 @@ static int solve_cascaded_WLNL(rtk_t *rtk, double *bias, double *xa, int nb,
     return fixed_count;
 }
 
+/* Continuous-only PAR in reduced integer coordinates. */
+static int resamb_combinations(rtk_t *rtk, double *bias, double *xa,int gps,int glo,int sbs)
+{
+    prcopt_t *opt=&rtk->opt;
+    int i,j,k,m,nb,nx=rtk->nx,na=rtk->na,lowest,mindim,ret=0,info,*ix,*order;
+    double *y,*Qb,*Qxd,*Z,*Qz,*temp,*z,*Qxz,*ys,*Qs,*Qxs,*b,*db,*Qi,*Qaz,*QQ,*c;
+    double s[2],full_ratio=0.0,value,position_variance,closure=0.0;
+    char ts[40];
+
+    rtk->sol.ratio=0.0;
+    rtk->nb_ar=0;
+    rtk->sol.thres=(float)opt->thresar[0];
+    if (opt->modear!=ARMODE_CONT||opt->glomodear!=GLO_ARMODE_OFF||
+        opt->thresar[5]!=opt->thresar[6]||opt->ionoopt==IONOOPT_IFLC||
+        opt->ar_test!=0||py_ar_is_active()) {
+        errmsg(rtk,"combination PAR requires continuous AR, GLO AR off, fixed RT and raw frequencies\n");
+        return 0;
+    }
+    if (!isfinite(opt->parmaxfrac)||opt->parmaxfrac<0.0||opt->parmaxfrac>1.0||
+        !isfinite(opt->arfixstd)||opt->arfixstd<0.0) {
+        errmsg(rtk,"invalid combination PAR fraction or position standard deviation\n");
+        return 0;
+    }
+    ix=imat(nx,2);
+    nb=ddidx(rtk,ix,gps,glo,sbs);
+    mindim=MAX(MAX(2,opt->par_minamb),opt->minfixsats-1);
+    if (nb<mindim) {
+        free(ix);
+        return -1;
+    }
+    rtk->nb_ar=nb;
+    lowest=MAX(mindim,nb-(int)(nb*opt->parmaxfrac));
+    order=imat(nb,1);
+    y=mat(nb,1); Qb=mat(nb,nb); Qxd=mat(nx,nb);
+    Z=mat(nb,nb); Qz=mat(nb,nb); temp=mat(nb,nb); z=mat(nb,1); Qxz=mat(nx,nb);
+    ys=mat(nb,1); Qs=mat(nb,nb); Qxs=mat(nx,nb); b=mat(nb,2); db=mat(nb,1);
+    Qi=mat(nb,nb); Qaz=mat(na,nb); QQ=mat(na,nb); c=zeros(nx,1);
+    for (j=0;j<nb;j++) {
+        y[j]=rtk->x[ix[j*2]]-rtk->x[ix[j*2+1]];
+        for (i=0;i<nx;i++) Qxd[i+j*nx]=
+            rtk->P[i+ix[j*2]*nx]-rtk->P[i+ix[j*2+1]*nx];
+    }
+    for (j=0;j<nb;j++) for (i=0;i<nb;i++) {
+        Qb[i+j*nb]=Qxd[ix[i*2]+j*nx]-Qxd[ix[i*2+1]+j*nx];
+    }
+    /* The full attempt is exactly the original DD integer least-squares problem. */
+    m=nb;
+    matcpy(ys,y,nb,1); matcpy(Qs,Qb,nb,nb); matcpy(Qxs,Qxd,nx,nb);
+    info=lambda(m,2,ys,Qs,b,s);
+    if (!info) {
+        full_ratio=s[0]>0.0?s[1]/s[0]:0.0;
+        rtk->sol.ratio=(float)MIN(full_ratio,999.9);
+        if (s[0]<=0.0||s[1]/s[0]>=rtk->sol.thres) goto condition;
+    }
+    if (lowest==nb||lambda_reduction(nb,Qb,Z)) goto cleanup;
+    matmul("NN",nb,nb,nb,Qb,Z,temp);
+    matmul("TN",nb,nb,nb,Z,temp,Qz);
+    matmul("TN",nb,1,nb,Z,y,z);
+    matmul("NN",nx,nb,nb,Qxd,Z,Qxz);
+    /* Smaller marginal variances rank the reduced integer combinations first. */
+    for (i=0;i<nb;i++) order[i]=i;
+    for (i=1;i<nb;i++) {
+        k=order[i];
+        for (j=i;j>0&&Qz[k+k*nb]<Qz[order[j-1]+order[j-1]*nb];j--) {
+            order[j]=order[j-1];
+        }
+        order[j]=k;
+    }
+    for (m=nb-1;m>=lowest;m--) {
+        for (j=0;j<m;j++) {
+            ys[j]=z[order[j]];
+            for (i=0;i<m;i++) Qs[i+j*m]=Qz[order[i]+order[j]*nb];
+            for (i=0;i<nx;i++) Qxs[i+j*nx]=Qxz[i+order[j]*nx];
+        }
+        if (lambda(m,2,ys,Qs,b,s)) continue;
+        rtk->sol.ratio=(float)MIN(s[0]>0.0?s[1]/s[0]:0.0,999.9);
+        if (s[0]<=0.0||s[1]/s[0]>=rtk->sol.thres) goto condition;
+    }
+    goto cleanup;
+
+condition:
+    /* Qxs=P D' Zs. Condition every state, including unfixed original ambiguities. */
+    matcpy(Qi,Qs,m,m);
+    if (matinv(Qi,m)) goto cleanup;
+    for (i=0;i<m;i++) db[i]=ys[i]-b[i];
+    matmul("NN",m,1,m,Qi,db,ys);
+    matcpy(xa,rtk->x,nx,1);
+    matmulm("NN",nx,1,m,Qxs,ys,xa);
+    for (i=0;i<nx;i++) if (!isfinite(xa[i])) goto cleanup;
+    for (j=0;j<m;j++) for (i=0;i<na;i++) Qaz[i+j*na]=Qxs[i+j*nx];
+    matmul("NN",na,m,m,Qaz,Qi,QQ);
+    for (j=0;j<na;j++) for (i=0;i<na;i++) rtk->Pa[i+j*na]=rtk->P[i+j*nx];
+    matmulm("NT",na,na,m,QQ,Qaz,rtk->Pa);
+    for (i=0;i<na*na;i++) if (!isfinite(rtk->Pa[i])) goto cleanup;
+    position_variance=rtk->Pa[0]+rtk->Pa[1+na]+rtk->Pa[2+2*na];
+    if (opt->arfixstd>0.0&&(position_variance<0.0||
+        sqrt(position_variance)>opt->arfixstd)) {
+        rtk->sol.ratio=0.0;
+        goto cleanup;
+    }
+    for (i=0;i<na;i++) rtk->xa[i]=xa[i];
+    for (i=0;i<m;i++) bias[i]=b[i];
+    if (m<nb) {
+        for (i=0;i<MAXSAT;i++) for (j=0;j<NF(opt);j++) {
+            if (rtk->ssat[i].fix[j]==2) rtk->ssat[i].fix[j]=1;
+        }
+        for (j=0;j<m;j++) {
+            for (i=na;i<nx;i++) c[i]=0.0;
+            for (k=0;k<nb;k++) {
+                value=Z[k+order[j]*nb];
+                c[ix[k*2]]+=value;
+                c[ix[k*2+1]]-=value;
+            }
+            for (i=na;i<nx;i++) if (c[i]!=0.0) {
+                k=(i-na)%MAXSAT;
+                if (rtk->ssat[k].lock[(i-na)/MAXSAT]==0) {
+                    rtk->ssat[k].lock[(i-na)/MAXSAT]=1;
+                }
+            }
+        }
+    }
+    ret=m;
+    rtk->nb_ar=m;
+    /* Replay diagnostics: accepted here can still fail the caller's residual test. */
+    if (gettracelevel()>=1) {
+        for (j=0;j<nb;j++) y[j]=xa[ix[j*2]]-xa[ix[j*2+1]];
+        for (j=0;j<m;j++) {
+            value=-b[j];
+            if (m==nb) value+=y[j];
+            else for (k=0;k<nb;k++) value+=Z[k+order[j]*nb]*y[k];
+            closure=MAX(closure,fabs(value));
+        }
+        time2str(rtk->sol.time,ts,3);
+        trace(1,"COMBPAR %s %d %d %.9g %.9g %.12g\n",
+              ts,nb,m,full_ratio,rtk->sol.ratio,closure);
+    }
+cleanup:
+    free(ix); free(order); free(y); free(Qb); free(Qxd); free(Z); free(Qz); free(temp);
+    free(z); free(Qxz); free(ys); free(Qs); free(Qxs); free(b); free(db); free(Qi);
+    free(Qaz); free(QQ); free(c);
+    return ret;
+}
+
 /* resolve integer ambiguity by LAMBDA ---------------------------------------*/
 static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,int sbs)
 {
@@ -2640,13 +2783,17 @@ static int manage_amb_LAMBDA(rtk_t *rtk, double *bias, double *xa, const int *sa
        (rtk->opt.glomodear != GLO_ARMODE_FIXHOLD || rtk->holdamb);
     sbas1=(rtk->opt.navsys&SYS_GLO)?glo1:((rtk->opt.navsys&SYS_SBS)?1:0);
     /* first attempt to resolve ambiguities */
-    nb=resamb_LAMBDA(rtk,bias,xa,gps1,glo1,sbas1);
+    if (rtk->opt.combpar)
+        nb=resamb_combinations(rtk,bias,xa,gps1,glo1,sbas1);
+    else
+        nb=resamb_LAMBDA(rtk,bias,xa,gps1,glo1,sbas1);
     float ratio1=rtk->sol.ratio;
         rtk->sol.prev_ratio1=ratio1;
 
 
     /* if fix-and-hold gloarmode enabled, re-run AR with final gps/glo settings if differ from above */
-    if ((rtk->opt.navsys&SYS_GLO) && rtk->opt.glomodear==GLO_ARMODE_FIXHOLD && rtk->sol.ratio<rtk->sol.thres) {
+    if (!rtk->opt.combpar && (rtk->opt.navsys&SYS_GLO) &&
+        rtk->opt.glomodear==GLO_ARMODE_FIXHOLD && rtk->sol.ratio<rtk->sol.thres) {
         glo2=sbas2=0;
         /* turn off gpsmode if not enabled and got good fix (used for debug and eval only) */
         gps2=rtk->opt.gpsmodear==0&&rtk->sol.ratio>=rtk->sol.thres?0:1;

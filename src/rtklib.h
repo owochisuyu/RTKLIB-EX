@@ -1111,6 +1111,9 @@ typedef struct {        /* processing options type */
     int  par;           /* partial ambiguity resolution (0:off,1:on) */
     int  par_minamb;    /* minimum number of ambiguities for PAR */
     double iono_tau;   /* weighted ionosphere GM correlation time (s), >0 */
+    int combpar;       /* reduced integer combination PAR (0:off,1:on) */
+    double parmaxfrac;  /* maximum fraction of combinations dropped */
+    double arfixstd;    /* maximum 3D posterior position std (m); 0 disables */
 } prcopt_t;
 
 typedef struct {        /* solution options type */
