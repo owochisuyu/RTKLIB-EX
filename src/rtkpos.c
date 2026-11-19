@@ -532,9 +532,48 @@ static void udpos(rtk_t *rtk, double tt)
     /* static mode */
     if (rtk->opt.mode==PMODE_STATIC||rtk->opt.mode==PMODE_STATIC_START) return;
 
-    /* kinematic mode without dynamics */
+    /* kinematic mode without dynamics: motion prior propagation x^-=x+v*tt, P^-=F*P*F'+Q */
     if (!rtk->opt.dynamics) {
-        for (i=0;i<3;i++) initx(rtk,rtk->sol.rr[i],VAR_POS,i);
+        double var_pos = 0.0, vnorm = norm(rtk->sol.rr + 3, 3);
+        double qv_tr = (double)rtk->sol.qv[0] + (double)rtk->sol.qv[1] + (double)rtk->sol.qv[2];
+        int p_ok = (norm(rtk->x, 3) > RE_WGS84 / 2.0 &&
+                    rtk->P[0] > 0.0 && rtk->P[1 + rtk->nx] > 0.0 && rtk->P[2 + 2 * rtk->nx] > 0.0);
+        if (p_ok) {
+            for (i = 0; i < 3; i++) var_pos += rtk->P[i + i * rtk->nx];
+            var_pos /= 3.0;
+        }
+        int vel_ok = (isfinite(vnorm) && vnorm < 100.0 &&
+                      rtk->sol.qv[0] > 0.0f && rtk->sol.qv[1] > 0.0f && rtk->sol.qv[2] > 0.0f &&
+                      isfinite(qv_tr) && qv_tr < SQR(20.0));
+        if (p_ok && var_pos <= VAR_POS && fabs(tt) > 0.0 && fabs(tt) <= 5.0 && vel_ok) {
+            double x0[3], d = 0.0;
+            for (i = 0; i < 3; i++) {
+                x0[i] = rtk->x[i] + rtk->sol.rr[3 + i] * tt;
+                d += SQR(x0[i] - rtk->sol.rr[i]);
+            }
+            if (sqrt(d) < 50.0) {
+                double dt2 = tt * tt, dt4 = dt2 * dt2;
+                double qv_mat[9] = {
+                    rtk->sol.qv[0], rtk->sol.qv[3], rtk->sol.qv[5],
+                    rtk->sol.qv[3], rtk->sol.qv[1], rtk->sol.qv[4],
+                    rtk->sol.qv[5], rtk->sol.qv[4], rtk->sol.qv[2]
+                };
+                double prn_pos = SQR(rtk->opt.prn[5]) * fabs(tt);
+                /* Propagate Doppler velocity covariance (dt^2 * Q_v) + unmodeled acceleration noise */
+                Q[0] = Q[4] = 0.25 * SQR(rtk->opt.prn[3]) * dt4 + prn_pos;
+                Q[8]        = 0.25 * SQR(rtk->opt.prn[4]) * dt4 + prn_pos;
+                ecef2pos(x0, pos);
+                covecef(pos, Q, Qv);
+                for (i = 0; i < 3; i++) {
+                    rtk->x[i] = x0[i];
+                    for (j = 0; j < 3; j++) {
+                        rtk->P[i + j * rtk->nx] += dt2 * qv_mat[i + j * 3] + Qv[i + j * 3];
+                    }
+                }
+                return;
+            }
+        }
+        for (i = 0; i < 3; i++) initx(rtk, rtk->sol.rr[i], VAR_POS, i);
         return;
     }
     /* check variance of estimated position */
@@ -2528,7 +2567,7 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa,int gps,int glo,in
 /* resolve integer ambiguity by LAMBDA using partial fix techniques and multiple attempts -----------------------*/
 static int manage_amb_LAMBDA(rtk_t *rtk, double *bias, double *xa, const int *sat, int nf, int ns)
 {
-    int gps1=-1,glo1=-1,sbas1=-1,gps2,glo2,sbas2,nb,rerun,dly;
+    int gps1=-1,glo1=-1,sbas1=-1,gps2,glo2,sbas2,nb;
 
     /* calc position variance, will skip AR if too high to avoid false fix */
     double posvar = 0;
@@ -2603,33 +2642,7 @@ static int manage_amb_LAMBDA(rtk_t *rtk, double *bias, double *xa, const int *sa
     /* first attempt to resolve ambiguities */
     nb=resamb_LAMBDA(rtk,bias,xa,gps1,glo1,sbas1);
     float ratio1=rtk->sol.ratio;
-    /* reject bad satellites if AR filtering enabled */
-    if (rtk->opt.arfilter) {
-        rerun=0;
-        /* if results are much poorer than previous epoch or dropped below ar ratio thresh, remove new sats */
-        if (nb>=0 && rtk->sol.prev_ratio2>=rtk->sol.thres && ((rtk->sol.ratio<rtk->sol.thres) ||
-            (rtk->sol.ratio<rtk->opt.thresar[0]*1.1 && rtk->sol.ratio<rtk->sol.prev_ratio1/2.0))) {
-            trace(3,"low ratio: check for new sat\n");
-            dly=2;
-            for (int i=0;i<ns;i++) for (int f=0;f<nf;f++) {
-                if (rtk->ssat[sat[i]-1].fix[f]!=2) continue;
-                /* check for new sats */
-                if (rtk->ssat[sat[i]-1].lock[f]==0) {
-                    trace(3,"remove sat %d:%d lock=%d\n",sat[i],f,rtk->ssat[sat[i]-1].lock[f]);
-                    rtk->ssat[sat[i]-1].lock[f]=-rtk->opt.minlock-dly;  /* delay use of this sat with stagger */
-                    dly+=2;  /* stagger next try of new sats */
-                    rerun=1;
-                }
-            }
-        }
-        /* rerun if filter removed any sats */
-        if (rerun) {
-            trace(3,"rerun AR with new sats removed\n");
-            /* try again with new sats removed */
-            nb=resamb_LAMBDA(rtk,bias,xa,gps1,glo1,sbas1);
-        }
-    }
-    rtk->sol.prev_ratio1=ratio1;
+        rtk->sol.prev_ratio1=ratio1;
 
 
     /* if fix-and-hold gloarmode enabled, re-run AR with final gps/glo settings if differ from above */
@@ -2931,7 +2944,21 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
             if (f==0) rtk->sol.ns++; /* valid satellite count by L1 */
         }
         /* too few valid phases */
-        if (rtk->sol.ns<4) stat=SOLQ_DGPS;
+        if (rtk->sol.ns<4) {
+            int valid_code[MAXSAT]={0};
+            stat=SOLQ_DGPS;
+            /* Count satellites in accepted code DDs, not AR phase flags.
+             * vflg: bits 16-23 = reference satellite, bits 8-15 = other satellite,
+             * bits 4-7 = measurement type, bits 0-3 = zero-based frequency index.
+             * Mark both satellites to count each only once across all DDs. */
+            for (i=0;i<nv;i++) {
+                if ((vflg[i]&0xFF)!=0x10) continue; /* type 1: code, frequency index 0 */
+                valid_code[((vflg[i]>>16)&0xFF)-1]=1;
+                valid_code[((vflg[i]>>8)&0xFF)-1]=1;
+            }
+            rtk->sol.ns=0;
+            for (i=0;i<MAXSAT;i++) rtk->sol.ns+=valid_code[i];
+        }
     }
     else stat=SOLQ_NONE;
     /* resolve integer ambiguity by LAMBDA */

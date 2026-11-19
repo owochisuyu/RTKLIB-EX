@@ -678,6 +678,8 @@ extern int pntpos(const obsd_t *obs, int n, const nav_t *nav,
     trace(3,"pntpos  : tobs=%s n=%d\n",time2str(obs[0].time,tstr,3),n);
     
     sol->stat=SOLQ_NONE;
+    for (i=3;i<6;i++) sol->rr[i]=0.0;
+    for (i=0;i<6;i++) sol->qv[i]=0.0f;
     
     if (n<=0) {
         strcpy(msg,"no observation data");

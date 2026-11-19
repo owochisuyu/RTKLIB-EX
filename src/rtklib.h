@@ -97,6 +97,7 @@ extern "C" {
 #define FE_WGS84    (1.0/298.257223563) /* earth flattening (WGS84) */
 
 #define HION        350000.0            /* ionosphere height (m) */
+#define TECK        40.308193E16        /* TECU to delay: TECK/freq^2 (m/TECU) */
 
 #define MAXFREQ     6                   /* max NFREQ */
 
@@ -764,13 +765,13 @@ typedef struct {        /* TEC grid type */
 typedef struct {
     double udint;
     double qi;
-    int iod;
-    int nlay;
-    int nmax[4];
-    int mmax[4];
+    unsigned iod;
+    unsigned nlay;
+    unsigned nmax[4];
+    unsigned mmax[4];
     double hgt[4];
-    double cosC[4][16][16];
-    double sinC[4][16][16];
+    double cosC[4][17][17];
+    double sinC[4][17][17];
 } vtec_t;
 
 typedef struct {        /* SBAS message type */
@@ -1054,7 +1055,6 @@ typedef struct {        /* processing options type */
     int glomodear;      /* GLONASS AR mode (0:off,1:on,2:auto cal,3:ext cal) */
     int gpsmodear;      /* GPS AR mode, debug/learning only (0:off,1:on) */
     int bdsmodear;      /* BeiDou AR mode (0:off,1:on) */
-    int arfilter;       /* AR filtering to reject bad sats (0:off,1:on) */
     int maxout;         /* obs outage count to reset bias */
     int minlock;        /* min lock count to fix ambiguity */
     int minfixsats;     /* min sats to fix integer ambiguities */
@@ -1251,7 +1251,6 @@ typedef struct {        /* RTK control/result type */
     int initial_mode;   /* initial positioning mode */
     int epoch;          /* epoch number */
     int intpres_nb;     /* Time interpolation of residuals, number of previous base observations */
-    int vtec_used;      /* indicates VTEC coeffs have been used to init ion states */
     obsd_t intpres_obsb[MAXOBS]; /* Time interpolation of residuals, previous base observations */
 } rtk_t;
 

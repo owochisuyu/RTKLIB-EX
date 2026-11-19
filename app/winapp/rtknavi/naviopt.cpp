@@ -451,7 +451,7 @@ void __fastcall TOptDialog::GetOpt(void)
 	MinHoldSats	 ->Text     =s.sprintf("%d",  PrcOpt.minholdsats);
 	MinDropSats	 ->Text     =s.sprintf("%d",  PrcOpt.mindropsats);
 	SyncSol		 ->ItemIndex=PrcOpt.syncsol;
-	ARFilter	 ->ItemIndex=PrcOpt.arfilter;
+    /* [arfilter removed] */ // ARFilter	 ->ItemIndex=PrcOpt.arfilter;
 	ExSatsE		 ->Text     =ExSats;
 	NavSys1		 ->Checked  =PrcOpt.navsys&SYS_GPS;
 	NavSys2		 ->Checked  =PrcOpt.navsys&SYS_GLO;
@@ -596,7 +596,7 @@ void __fastcall TOptDialog::SetOpt(void)
 	PrcOpt.mindropsats =MinDropSats->Text.ToInt();
 	PrcOpt.niter     =NumIter     ->Text.ToInt();
 	PrcOpt.syncsol   =SyncSol     ->ItemIndex;
-	PrcOpt.arfilter  =ARFilter    ->ItemIndex;
+    /* [arfilter removed] */ // PrcOpt.arfilter  =ARFilter    ->ItemIndex;
 	ExSats			 =ExSatsE	  ->Text;
 	PrcOpt.navsys    =0;
 	if (NavSys1->Checked) PrcOpt.navsys|=SYS_GPS;
@@ -803,7 +803,7 @@ void __fastcall TOptDialog::LoadOpt(AnsiString file)
 	MinDropSats	 ->Text         =s.sprintf("%d",  prcopt.mindropsats);
 	NumIter		 ->Text			=s.sprintf("%d",  prcopt.niter    );
 	SyncSol		 ->ItemIndex	=prcopt.syncsol;
-	ARFilter	 ->ItemIndex	=prcopt.arfilter;
+    /* [arfilter removed] */ // ARFilter	 ->ItemIndex	=prcopt.arfilter;
 	BaselineLen	 ->Text			=s.sprintf("%.3f",prcopt.baseline[0]);
 	BaselineSig	 ->Text			=s.sprintf("%.3f",prcopt.baseline[1]);
 	BaselineConst->Checked		=prcopt.baseline[0]>0.0;
@@ -1046,7 +1046,7 @@ void __fastcall TOptDialog::SaveOpt(AnsiString file)
 	prcopt.mindropsats=str2dbl(MinDropSats		->Text);
 	prcopt.niter	=str2dbl(NumIter	->Text);
 	prcopt.syncsol	=SyncSol->ItemIndex;
-	prcopt.arfilter	=ARFilter->ItemIndex;
+    /* [arfilter removed] */ // prcopt.arfilter	=ARFilter->ItemIndex;
 	if (prcopt.mode==PMODE_MOVEB&&BaselineConst->Checked) {
 		prcopt.baseline[0]=str2dbl(BaselineLen->Text);
 		prcopt.baseline[1]=str2dbl(BaselineSig->Text);
