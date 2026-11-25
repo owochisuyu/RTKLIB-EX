@@ -1,3 +1,4 @@
+#ifdef ENABLE_PY_AR_HOOK
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <errno.h>
@@ -116,3 +117,32 @@ void py_ar_cleanup(void)
         Py_Finalize();
     }
 }
+
+#else
+#include <stdio.h>
+#include "py_ar_hook.h"
+
+int py_ar_init(const char *script_path, const char *func_name)
+{
+    (void)script_path;
+    (void)func_name;
+    fprintf(stderr, "[RTKLIB-C-PY-C] Embedded Python AR hook disabled at build time (rebuild with USE_PYTHON=1 / -DENABLE_PY_AR_HOOK=ON)\n");
+    return 0;
+}
+
+int py_ar_is_active(void)
+{
+    return 0;
+}
+
+int py_ar_evaluate(const double *features, int n_feat)
+{
+    (void)features;
+    (void)n_feat;
+    return 0;
+}
+
+void py_ar_cleanup(void)
+{
+}
+#endif

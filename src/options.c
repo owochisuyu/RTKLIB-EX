@@ -95,6 +95,7 @@ EXPORT opt_t sysopts[]={
     {"pos2-artest",     3,  (void *)&prcopt_.ar_test,    "0:ratio,1:ffrt"},
     {"pos2-ffrtpf",     1,  (void *)&prcopt_.ffrt_pf,    "0.01 or 0.001"},
     {"pos2-arstrategy", 3,  (void *)&prcopt_.arstrategy, "0:full,1:wlnl,2:par"},
+    {"pos2-mlmode",     3,  (void *)&prcopt_.ml_mode,    "0:off,1:train,2:test"},
     {"pos2-parminamb",  0,  (void *)&prcopt_.par_minamb, ""     },
     {"pos2-parminps",   1,  (void *)&prcopt_.par_minps,  "0<Ps<=1 (subset selection)" },
     {"pos2-arthres",    1,  (void *)&prcopt_.thresar[0], ""     },

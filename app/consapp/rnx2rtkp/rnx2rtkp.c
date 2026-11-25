@@ -200,10 +200,29 @@ int main(int argc, char **argv)
         showmsg("error : no input file");
         return EXIT_FAILURE;
     }
+    const char *ml_mode_env = getenv("RTK_ML_MODE");
+    if (ml_mode_env && *ml_mode_env) {
+        if (!strcmp(ml_mode_env, "off") || !strcmp(ml_mode_env, "0")) {
+            prcopt.ml_mode = MLMODE_OFF;
+        } else if (!strcmp(ml_mode_env, "train") || !strcmp(ml_mode_env, "1")) {
+            prcopt.ml_mode = MLMODE_TRAIN;
+        } else if (!strcmp(ml_mode_env, "test") || !strcmp(ml_mode_env, "2")) {
+            prcopt.ml_mode = MLMODE_TEST;
+        } else {
+            showmsg("error : invalid RTK_ML_MODE=%s (expected off, train, or test)", ml_mode_env);
+            return EXIT_FAILURE;
+        }
+    }
     const char *ml_hook = getenv("RTK_PY_AR_HOOK");
-    if (ml_hook && *ml_hook && !py_ar_init(ml_hook, NULL)) {
-        showmsg("error : requested ML hook is not ready; no epochs processed");
-        return EXIT_FAILURE;
+    if (prcopt.ml_mode == MLMODE_OFF && (!ml_mode_env || !*ml_mode_env) &&
+        ml_hook && *ml_hook) {
+        prcopt.ml_mode = MLMODE_TEST;
+    }
+    if (prcopt.ml_mode == MLMODE_TEST) {
+        if (!ml_hook || !*ml_hook || !py_ar_init(ml_hook, NULL)) {
+            showmsg("error : requested ML hook is not ready; no epochs processed");
+            return EXIT_FAILURE;
+        }
     }
     if (solopt.trace > 0) {
         if (*filopt.trace == '\0')

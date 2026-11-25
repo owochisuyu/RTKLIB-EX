@@ -493,10 +493,13 @@ static int selsat(const obsd_t *obs, double *azel, int nu, int nr,
         if      (obs[i].sat<obs[j].sat) j--;
         else if (obs[i].sat>obs[j].sat) i--;
         else if (azel[1+j*2]>=opt->elmin) { /* elevation at base station */
-            /* dynamically enforce shared dual-frequency carrier observations */
-            if (opt->nf>=2) {
-                if (obs[i].L[0]==0.0||obs[j].L[0]==0.0||
-                    obs[i].L[1]==0.0||obs[j].L[1]==0.0) {
+            /* dynamically enforce shared dual-frequency carrier observations in carrier RTK */
+            if (opt->nf>=2 && opt->mode>=PMODE_KINEMA && opt->mode<=PMODE_FIXED) {
+                int f, shared=0;
+                for (f=0;f<opt->nf;f++) {
+                    if (obs[i].L[f]!=0.0 && obs[j].L[f]!=0.0) shared++;
+                }
+                if (shared<2) {
                     trace(4,"skip non-dual-freq sat=%3d iu=%2d ir=%2d\n",obs[i].sat,i,j);
                     continue;
                 }
@@ -521,6 +524,7 @@ static void udpos(rtk_t *rtk, double tt)
         return;
     }
     /* initialize position for first epoch */
+    int fresh_init = 0;
     if (norm(rtk->x, 3) <= RE_WGS84 / 2) {
         trace(3,"rr_init=");tracemat(3,rtk->sol.rr,1,6,15,6);
         for (i=0;i<3;i++) initx(rtk,rtk->sol.rr[i],VAR_POS,i);
@@ -528,12 +532,13 @@ static void udpos(rtk_t *rtk, double tt)
             for (i=3;i<6;i++) initx(rtk,rtk->sol.rr[i],VAR_VEL,i);
             for (i=6;i<9;i++) initx(rtk,1E-6,VAR_ACC,i);
         }
+        fresh_init = 1;
     }
     /* static mode */
     if (rtk->opt.mode==PMODE_STATIC||rtk->opt.mode==PMODE_STATIC_START) return;
 
     /* kinematic mode without dynamics: motion prior propagation x^-=x+v*tt, P^-=F*P*F'+Q */
-    if (!rtk->opt.dynamics) {
+    if (!rtk->opt.dynamics && !fresh_init) {
         double var_pos = 0.0, vnorm = norm(rtk->sol.rr + 3, 3);
         double qv_tr = (double)rtk->sol.qv[0] + (double)rtk->sol.qv[1] + (double)rtk->sol.qv[2];
         int p_ok = (norm(rtk->x, 3) > RE_WGS84 / 2.0 &&
@@ -898,32 +903,17 @@ static void detslp_gf(rtk_t *rtk, const obsd_t *obs, int i, int j,
         }
 
         double mw1=sdmw(obs,i,j,k,nav);
-        double mw0=rtk->ssat[sat-1].mw[k-1];
         if (mw1!=0.0) {
             rtk->ssat[sat-1].mw[k-1]=mw1;
         }
 
+        /* R05 fix: do not allow smooth MW to veto GF jumps (equal L1/L2 slips have dMW=0).
+         * Use pos2-slipmon=shadow/apply for multi-frequency GF+MW arc monitoring. */
         if (detslp_gf_poly(&rtk->ssat[sat-1], k-1, gf1, obs[i].time, rtk->opt.thresslip)) {
-            int slip_confirmed=1;
-            /* Melbourne-Wubbena (MW) dual-arbitration:
-             * MW is 100% ionosphere-free. If MW is smooth (dmw < 0.42m, < 0.5 cycle WL)
-             * and receiver tracking loop has not lost lock (LLI == 0), the GF jump is an
-             * ionospheric scintillation/gradient transient rather than a true integer slip! */
-            if (mw0!=0.0&&mw1!=0.0) {
-                double dmw=fabs(mw1-mw0);
-                int lli=(obs[i].LLI[0]|obs[i].LLI[k]|obs[j].LLI[0]|obs[j].LLI[k]);
-                if (dmw<0.42&&!(lli&LLI_SLIP)) {
-                    slip_confirmed=0;
-                    trace(3,"detslp_gf: sat=%2d L1-L%d GF jump suppressed by smooth MW (dGF=%.3f dMW=%.3f)\n",
-                          sat,k+1,gf1,dmw);
-                }
-            }
-            if (slip_confirmed) {
-                rtk->ssat[sat-1].slip[0]|=LLI_SLIP;
-                rtk->ssat[sat-1].slip[k]|=LLI_SLIP;
-                errmsg(rtk,"slip detected GF jump (sat=%2d L1-L%d GF=%.3f)\n",
-                    sat,k+1,gf1);
-            }
+            rtk->ssat[sat-1].slip[0]|=LLI_SLIP;
+            rtk->ssat[sat-1].slip[k]|=LLI_SLIP;
+            errmsg(rtk,"slip detected GF jump (sat=%2d L1-L%d GF=%.3f)\n",
+                sat,k+1,gf1);
         }
     }
 }
@@ -1840,6 +1830,7 @@ static int ddidx(rtk_t *rtk, int *ix, int gps, int glo, int sbs)
                     !rtk->ssat[i-k].vsat[f]) {
                     continue;
                 }
+                if (sbs==0 && satsys(i-k+1,NULL)==SYS_SBS) continue;
                 if (!rtk->ssat[i-k].ar_block[f]&&rtk->ssat[i-k].lock[f]>=0&&!(rtk->ssat[i-k].slip[f]&LLI_HALFC)&&
                     rtk->ssat[i-k].azel[1]>=rtk->opt.elmaskar&&!nofix) {
                     if (rtk->ssat[i-k].azel[1] > max_el) {
@@ -2238,6 +2229,122 @@ static int accept_dd_candidates(rtk_t *rtk, int n, const double s[2],
     return ratio>=rtk->sol.thres;
 }
 
+/* Ground truth station coordinates (ECEF m) for native ML training mode labeling */
+typedef struct {
+    const char *name;
+    double pos[3];
+} ml_station_truth_t;
+
+static const ml_station_truth_t ML_GROUND_TRUTH[] = {
+    /* Hong Kong CORS stations */
+    {"HKSL", {-2393383.2026, 5393860.9086, 2412592.1400}},
+    {"HKWS", {-2430579.7928, 5374285.4095, 2418956.0603}},
+    {"HKPC", {-2405183.7828, 5392541.5614, 2403645.4580}},
+    {"HKOH", {-2423817.6823, 5386056.8355, 2399883.1018}},
+    {"HKKT", {-2405144.6856, 5385194.9886, 2420032.2730}},
+    {"HKLM", {-2414046.7316, 5391602.0856, 2396878.6180}},
+    {"HKLT", {-2399063.5226, 5389237.5766, 2417326.7860}},
+    {"HKNP", {-2392361.0406, 5400225.9866, 2400094.1870}},
+    {"HKSC", {-2414267.7066, 5386768.7206, 2407459.7600}},
+    {"HKSS", {-2424425.8876, 5377187.9106, 2418617.4740}},
+    {"HKST", {-2417143.6586, 5382345.2066, 2415036.6750}},
+    {"HKTK", {-2418093.1596, 5374658.0756, 2430428.9190}},
+    /* Australian stations */
+    {"INGH", {-5020389.8133, 3366530.6689, -2028801.1544}},
+    {"MRT5", {-5010599.5037, 3380168.0869, -2030373.4326}},
+    {"BAMB", {-5015465.1591, 3363191.8287, -2046342.8306}},
+    {"MRT2", {-5072717.8564, 3234318.5782, -2111429.7877}},
+    {"GIRU", {-5047777.9839, 3268207.3768, -2118958.6957}},
+    {NULL,   {0.0, 0.0, 0.0}}
+};
+
+/* output ML training sample (aligned 6 features + coords + 10 cm label) -------*/
+static void dump_ml_sample(const rtk_t *rtk)
+{
+    const char *ml_file = getenv("RTK_ML_SAMPLE_FILE");
+    const char *env_truth = getenv("RTK_ROVER_TRUTH_XYZ");
+    const char *env_vtec = getenv("RTK_ROVER_VTEC");
+    char tstr[64];
+    double dop[4] = {0}, azel[2*MAXSAT];
+    double dr[3], blen_km = 0.0;
+    double truth[3] = {0};
+    double vtec = (env_vtec && *env_vtec) ? atof(env_vtec) : 10.0;
+    int has_truth = 0;
+    int i, f, nsat = 0;
+
+    time2str(rtk->sol.time, tstr, 3);
+
+    /* 1. Compute PDOP from valid tracked satellites (consistent with accept_dd_candidates) */
+    for (i = 0; i < MAXSAT; i++) {
+        if (!rtk->ssat[i].vs) continue;
+        azel[2*nsat  ] = rtk->ssat[i].azel[0];
+        azel[2*nsat+1] = rtk->ssat[i].azel[1];
+        nsat++;
+    }
+    if (nsat >= 4) dops(nsat, azel, 0.0, dop);
+
+    /* 2. Baseline length in km */
+    if (norm(rtk->x, 3) > 1e6 && norm(rtk->rb, 3) > 1e6) {
+        for (i = 0; i < 3; i++) dr[i] = rtk->x[i] - rtk->rb[i];
+        blen_km = norm(dr, 3) / 1000.0;
+    }
+    int lasting_epochs = rtk->epoch + 1;
+
+    /* 3. Ground truth rover coordinates */
+    if (env_truth && *env_truth) {
+        if (sscanf(env_truth, "%lf,%lf,%lf", &truth[0], &truth[1], &truth[2]) == 3 ||
+            sscanf(env_truth, "%lf %lf %lf", &truth[0], &truth[1], &truth[2]) == 3) {
+            has_truth = 1;
+        }
+    }
+    if (!has_truth && norm(rtk->sol.rr, 3) > 1e6) {
+        double min_d = 1000.0;
+        for (i = 0; ML_GROUND_TRUTH[i].name != NULL; i++) {
+            double d_diff[3];
+            for (f = 0; f < 3; f++) d_diff[f] = rtk->sol.rr[f] - ML_GROUND_TRUTH[i].pos[f];
+            double d = norm(d_diff, 3);
+            if (d < min_d) {
+                min_d = d;
+                for (f = 0; f < 3; f++) truth[f] = ML_GROUND_TRUTH[i].pos[f];
+                has_truth = 1;
+            }
+        }
+    }
+
+    /* 4. 3D Euclidean error and 10 cm binary label */
+    double err_3d = -1.0;
+    int label = -1;
+    int label_10cm = -1;
+    if (has_truth) {
+        double d_err[3];
+        for (i = 0; i < 3; i++) d_err[i] = rtk->sol.rr[i] - truth[i];
+        err_3d = norm(d_err, 3);
+        label = (err_3d <= 0.10) ? 1 : 0;
+        label_10cm = label;
+    }
+
+    trace(2, "ML_SAMPLE,%s,%d,%.6f,%d,%.4f,%d,%.3f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%.4f,%d,%d\n",
+          tstr, rtk->epoch, rtk->sol.ratio, lasting_epochs, blen_km,
+          rtk->nb_ar, dop[1], vtec, rtk->sol.rr[0], rtk->sol.rr[1], rtk->sol.rr[2],
+          rtk->x[0], rtk->x[1], rtk->x[2], rtk->sol.ns, err_3d, label, label_10cm);
+
+    /* 5. Append to CSV file if configured */
+    if (ml_file && *ml_file) {
+        FILE *fp = fopen(ml_file, "a");
+        if (fp) {
+            fseek(fp, 0, SEEK_END);
+            if (ftell(fp) == 0) {
+                fprintf(fp, "time_gpst,epoch,ratio,lasting_epochs,blen_km,amb_dim,pdop,vtec,x,y,z,x_flt,y_flt,z_flt,ns,err_3d_m,label,label_10cm\n");
+            }
+            fprintf(fp, "%s,%d,%.6f,%d,%.4f,%d,%.3f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%.4f,%d,%d\n",
+                    tstr, rtk->epoch, rtk->sol.ratio, lasting_epochs, blen_km,
+                    rtk->nb_ar, dop[1], vtec, rtk->sol.rr[0], rtk->sol.rr[1], rtk->sol.rr[2],
+                    rtk->x[0], rtk->x[1], rtk->x[2], rtk->sol.ns, err_3d, label, label_10cm);
+            fclose(fp);
+        }
+    }
+}
+
 /* Form the model, choose one basis/subset, find both integers, validate once. */
 static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa, int gps,int glo,int sbs)
 {
@@ -2285,9 +2392,10 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa, int gps,int glo,i
     }
     for (i=0;i<MAXSAT;i++) ns+=sats[i];
     if (ns<opt->minfixsats) {fixed=-1; goto done;}
-    int use_ml=py_ar_is_active();
+    int is_train=(opt->ml_mode==MLMODE_TRAIN);
+    int use_ml=(opt->ml_mode==MLMODE_TEST && py_ar_is_active());
     int info=search_dd_candidates(n,na,six,strategy==ARSTRAT_WLNL,ys,Qs,F,s,
-                                  opt->ar_test&&!use_ml?&pf:NULL,&pairs);
+                                  opt->ar_test&&!use_ml&&!is_train?&pf:NULL,&pairs);
     if (strategy==ARSTRAT_WLNL&&!pairs) {
         trace(2,"AR no matched lanes time=%s available=%d strategy=wlnl\n",
               time2str(rtk->sol.time,t,3),nb);
@@ -2299,10 +2407,18 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa, int gps,int glo,i
         errmsg(rtk,"integer candidate search failed (n=%d info=%d)\n",n,info);
         goto done;
     }
-    int accepted=accept_dd_candidates(rtk,n,s,pf,use_ml);
+    int accepted;
+    if (is_train) {
+        double ratio=s[0]>0.0?s[1]/s[0]:INFINITY;
+        rtk->sol.ratio=(float)MIN(ratio,999.9);
+        rtk->sol.thres=0.0f;
+        accepted=1;
+    } else {
+        accepted=accept_dd_candidates(rtk,n,s,pf,use_ml);
+    }
     trace(2,"AR decision time=%s search=%s n=%d/%d pairs=%d test=%s s1=%.12g s2=%.12g accepted=%d strategy=%s\n",
           time2str(rtk->sol.time,t,3),pairs?"wlnl":"direct",n,nb,pairs,
-          use_ml?"ml":opt->ar_test?"ffrt":"ratio",s[0],s[1],accepted,name);
+          is_train?"ml-train":use_ml?"ml":opt->ar_test?"ffrt":"ratio",s[0],s[1],accepted,name);
     if (accepted) fixed=apply_fixed_dd_subset(rtk,bias,xa,nb,ix,n,rows,F,ys,Qs,Qas);
     else errmsg(rtk,"ambiguity validation failed (n=%d ratio=%.2f s=%.2f/%.2f)\n",
                 n,rtk->sol.ratio,s[0],s[1]);
@@ -2715,7 +2831,13 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
                     double var=rtk->Pa[i+i*rtk->na];
                     if (!isfinite(xa[i])||!isfinite(var)||var<0.0) finite_pos=0;
                 }
-                if (float_rows.ns>=4&&float_rows.nphase>=3&&nphys==float_rows.n&&
+                if (rtk->opt.ml_mode==MLMODE_TRAIN) {
+                    int val_ok=(float_rows.ns>=4&&float_rows.nphase>=3&&nphys==float_rows.n&&
+                                finite_pos&&valpos(rtk,v,R,vflg,nv,5.0,NULL,NULL));
+                    trace(3,"ml-train post-fix residual check: %d (finite=%d)\n",val_ok,finite_pos);
+                    if (finite_pos) stat=SOLQ_FIX;
+                }
+                else if (float_rows.ns>=4&&float_rows.nphase>=3&&nphys==float_rows.n&&
                     finite_pos&&valpos(rtk,v,R,vflg,nv,5.0,NULL,NULL)) {
                     for (i=0;i<nphys;i++) {
                         int s=((vflg[i]>>8)&0xFF)-1,k=vflg[i]&0xF;
@@ -2813,6 +2935,10 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
     free(vflg);
 
     if (stat!=SOLQ_NONE) rtk->sol.stat=stat;
+
+    if (rtk->opt.ml_mode==MLMODE_TRAIN && stat==SOLQ_FIX) {
+        dump_ml_sample(rtk);
+    }
 
     return stat!=SOLQ_NONE;
 }

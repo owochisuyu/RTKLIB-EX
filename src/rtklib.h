@@ -457,6 +457,10 @@ extern "C" {
 #define ARSTRAT_WLNL 1                  /* full-set joint wide/narrow-lane search */
 #define ARSTRAT_PAR  2                  /* direct search on a covariance-selected set */
 
+#define MLMODE_OFF   0                  /* ML AR mode: off (classic RT/FFRT) */
+#define MLMODE_TRAIN 1                  /* ML AR mode: training feature export */
+#define MLMODE_TEST  2                  /* ML AR mode: embedded Python AR decision */
+
 #define GLO_ARMODE_OFF  0               /* GLO AR mode: off */
 #define GLO_ARMODE_ON 1                 /* GLO AR mode: on */
 #define GLO_ARMODE_AUTOCAL 2            /* GLO AR mode: autocal */
@@ -1120,6 +1124,7 @@ typedef struct {        /* processing options type */
     int slipmon;       /* relative RTK slip monitor: 0=legacy,1=shadow,2=apply */
     double slipgap;    /* maximum bridge between trusted phases (s) */
     double par_minps;  /* model-only success floor for DD subset selection */
+    int ml_mode;       /* ML AR mode: 0=off, 1=train, 2=test */
 } prcopt_t;
 
 typedef struct {        /* solution options type */

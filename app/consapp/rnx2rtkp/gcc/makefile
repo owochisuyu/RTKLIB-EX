@@ -10,11 +10,14 @@ OPTS    = -DTRACE -DENAGLO -DENAQZS -DENAGAL -DENACMP -DENAIRN -DNFREQ=4 -DNEXOB
 CFLAGS  = -std=c99 -Wall -O3 -pedantic -Wno-unused-but-set-variable -I$(SRC) $(OPTS)
 LDLIBS  = -lgfortran -lm
 
-# Embedded Python 3.10 support
+# Optional embedded Python AR hook (default on for rnx2rtkp; override with USE_PYTHON=0)
+USE_PYTHON ?= 1
+ifeq ($(USE_PYTHON),1)
 PY_CFLAGS = $(shell python3-config --cflags --embed)
 PY_LDFLAGS = $(shell python3-config --ldflags --embed)
-CFLAGS += $(PY_CFLAGS)
+CFLAGS += -DENABLE_PY_AR_HOOK $(PY_CFLAGS)
 LDLIBS += $(PY_LDFLAGS)
+endif
 
 
 # OpenBLAS / LAPACK acceleration (enable with: make USE_BLAS=1)

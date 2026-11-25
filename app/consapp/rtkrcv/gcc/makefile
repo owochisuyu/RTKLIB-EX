@@ -17,13 +17,22 @@ CFLAGS += -DLAPACK
 LDLIBS += -lopenblas
 endif
 
+# Optional embedded Python AR hook (enable with: make USE_PYTHON=1)
+USE_PYTHON ?= 0
+ifeq ($(USE_PYTHON),1)
+PY_CFLAGS = $(shell python3-config --cflags --embed)
+PY_LDFLAGS = $(shell python3-config --ldflags --embed)
+CFLAGS += -DENABLE_PY_AR_HOOK $(PY_CFLAGS)
+LDLIBS += $(PY_LDFLAGS)
+endif
+
 all        : rtkrcv
 rtkrcv     : rtkrcv.o vt.o rtkcmn.o trace.o rtksvr.o rtkpos.o geoid.o solution.o lambda.o
 rtkrcv     : sbas.o stream.o rcvraw.o rtcm.o preceph.o options.o pntpos.o ppp.o ppp_ar.o
 rtkrcv     : novatel.o ublox.o crescent.o skytraq.o javad.o nvs.o binex.o
 rtkrcv     : rt17.o ephemeris.o rinex.o ionex.o rtcm2.o rtcm3.o rtcm3e.o
 rtkrcv     : tides.o septentrio.o swiftnav.o unicore.o ffrt.o
-rtkrcv     : sofa.o
+rtkrcv     : sofa.o py_ar_hook.o
 
 
 rtkrcv.o   : ../rtkrcv.c
@@ -100,6 +109,8 @@ unicore.o: $(SRC)/rcv/unicore.c
 	$(CC) -c $(CFLAGS) $(SRC)/rcv/unicore.c
 sofa.o     : $(SRC)/sofa.c
 	$(CC) -c $(CFLAGS) $(SRC)/sofa.c
+py_ar_hook.o : $(SRC)/py_ar_hook.c $(SRC)/py_ar_hook.h
+	$(CC) -c $(CFLAGS) $(SRC)/py_ar_hook.c
 ffrt.o     : $(SRC)/ffrt.c
 	$(CC) -c $(CFLAGS) $(SRC)/ffrt.c
 

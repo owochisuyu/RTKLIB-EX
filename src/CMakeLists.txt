@@ -39,8 +39,17 @@ set(DIR_SRCS_RTKLIB_RCV
 )
 list(APPEND DIR_SRCS ${DIR_SRCS_RTKLIB} ${DIR_SRCS_RTKLIB_RCV})
 
+option(ENABLE_PY_AR_HOOK "Enable embedded Python AR hook" OFF)
+if(ENABLE_PY_AR_HOOK)
+  find_package(Python3 REQUIRED COMPONENTS Development.Embed)
+  add_definitions(-DENABLE_PY_AR_HOOK)
+endif()
+
 add_library(rtklib SHARED ${DIR_SRCS} rtklib.h)
 set_property(TARGET rtklib PROPERTY C_STANDARD 99)
+if(ENABLE_PY_AR_HOOK)
+  target_link_libraries(rtklib Python3::Python)
+endif()
 
 
 target_include_directories(rtklib

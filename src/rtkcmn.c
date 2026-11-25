@@ -224,7 +224,7 @@ const prcopt_t prcopt_default={ /* defaults processing options */
     {{0}},{{0}},{0},            /* antdel,pcv,exsats */
     1,1                         /* maxaveep,initrst */,
     .ar_test=0, .ffrt_pf=0.001, .arstrategy=ARSTRAT_WLNL, .par_minamb=0, .iono_tau=120.0,
-    .slipmon=0, .slipgap=120.0, .par_minps=0.99
+    .slipmon=0, .slipgap=120.0, .par_minps=0.99, .ml_mode=MLMODE_OFF
 };
 const solopt_t solopt_default={ /* defaults solution output options */
     SOLF_LLH,TIMES_GPST,1,3,    /* posf,times,timef,timeu */
