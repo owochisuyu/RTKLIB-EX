@@ -8,6 +8,25 @@ set(BASE_LIBRARIES ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
 set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/test/utest)
 
 # The deterministic command/thread test doubles use POSIX APIs.
+add_executable(t_slipmon t_slipmon.c)
+target_link_libraries(t_slipmon rtklib)
+add_test(NAME phase_arc_monitor COMMAND t_slipmon)
+add_executable(t_filter_precision t_filter_precision.c)
+target_link_libraries(t_filter_precision rtklib)
+add_test(NAME filter_long_interval_precision COMMAND t_filter_precision)
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    if(TARGET rtkrcv)
+        set(AR_TEST_RTKRCV $<TARGET_FILE:rtkrcv>)
+    endif()
+    add_test(NAME ar_strategy_replay COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/ar_strategy_replay.py $<TARGET_FILE:rnx2rtkp> ${TEST_DATA_DIR}/rinex ${AR_TEST_RTKRCV})
+    add_test(NAME phase_arc_replay COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/slipmon_replay.py $<TARGET_FILE:rnx2rtkp> ${TEST_DATA_DIR}/rinex)
+    add_test(NAME kinematic_long_interval COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/long_interval_replay.py $<TARGET_FILE:rnx2rtkp> ${TEST_DATA_DIR}/rinex)
+endif()
+
 if(UNIX)
     add_executable(t_ftp_lifecycle t_ftp_lifecycle.c)
     target_link_libraries(t_ftp_lifecycle rtklib)

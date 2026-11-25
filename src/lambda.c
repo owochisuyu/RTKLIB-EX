@@ -32,7 +32,7 @@ static int LD(int n, const double *Q, double *L, double *D)
     
     memcpy(A,Q,sizeof(double)*n*n);
     for (i=n-1;i>=0;i--) {
-        if ((D[i]=A[i+i*n])<=0.0) {info=-1; break;}
+        if (!((D[i]=A[i+i*n])>0.0)||!isfinite(D[i])) {info=-1; break;}
         a=sqrt(D[i]);
         for (j=0;j<=i;j++) L[i+j*n]=A[i+j*n]/a;
         for (j=0;j<=i-1;j++) for (k=0;k<=j;k++) A[j+k*n]-=L[i+k*n]*L[i+j*n];
@@ -71,7 +71,7 @@ static void perm(int n, double *L, double *D, int j, double del, double *Z)
     for (k=0;k<n;k++) SWAP(Z[k+j*n],Z[k+(j+1)*n]);
 }
 /* lambda reduction (z=Z'*a, Qz=Z'*Q*Z=L'*diag(D)*L) (ref.[1]) ---------------*/
-static void reduction(int n, double *L, double *D, double *Z)
+static void reduction(int n, double *L, double *D, double *Z, int split)
 {
     int i,j,k;
     double del;
@@ -80,7 +80,9 @@ static void reduction(int n, double *L, double *D, double *Z)
     while (j>=0) {
         if (j<=k) for (i=j+1;i<n;i++) gauss(n,L,Z,i,j);
         del=D[j]+L[j+1+j*n]*L[j+1+j*n]*D[j+1];
-        if (del+1E-6<D[j+1]) { /* compared considering numerical error */
+        /* A permutation across split would move a conditional coordinate
+         * into the outer search block. Integer Gauss steps keep it intact. */
+        if (j+1!=split && del+1E-6<D[j+1]) {
             perm(n,L,D,j,del,Z);
             k=j; j=n-2;
         }
@@ -150,6 +152,11 @@ static int search(int n, int m, const double *L, const double *D,
             }
         }
     }
+    free(S); free(dist); free(zb); free(z); free(step);
+    if (c>=LOOPMAX||nn<m) {
+        fprintf(stderr,"%s : incomplete integer search\n",__FILE__);
+        return -2;
+    }
     for (i=0;i<m-1;i++) { /* sort by s */
         for (j=i+1;j<m;j++) {
             if (s[i]<s[j]) continue;
@@ -157,13 +164,30 @@ static int search(int n, int m, const double *L, const double *D,
             for (k=0;k<n;k++) SWAP(zn[k+i*n],zn[k+j*n]);
         }
     }
-    free(S); free(dist); free(zb); free(z); free(step);
-    
-    if (c>=LOOPMAX) {
-        fprintf(stderr,"%s : search loop count overflow\n",__FILE__);
-        return -2;
-    }
     return 0;
+}
+/* Failure bound from reduced conditional variances (cycles squared). */
+static double bootstrap_pf(int n, const double *D)
+{
+    double log_ps=0.0;
+    for (int i=0;i<n;i++) {
+        if (!(D[i]>0.0)||!isfinite(D[i])) return NAN;
+        log_ps+=log1p(-erfc(0.5/sqrt(2.0*D[i])));
+    }
+    return -expm1(log_ps);
+}
+
+/* Covariance-only canonical FFRT input. Does not enumerate integer points. */
+extern double lambda_model_pf(int n, const double *Q)
+{
+    if (n<=0) return NAN;
+    double *L=zeros(n,n),*D=mat(n,1),*Z=eye(n),pf=NAN;
+    if (!LD(n,Q,L,D)) {
+        reduction(n,L,D,Z,0);
+        pf=bootstrap_pf(n,D);
+    }
+    free(L); free(D); free(Z);
+    return pf;
 }
 /* lambda/mlambda integer least-square estimation ------------------------------
 * integer least-square estimation. reduction is performed by lambda (ref.[1]),
@@ -177,8 +201,8 @@ static int search(int n, int m, const double *L, const double *D,
 * return : status (0:ok,other:error)
 * notes  : matrix stored by column-major order (fortran convension)
 *-----------------------------------------------------------------------------*/
-extern int lambda_with_stats(int n, int m, const double *a, const double *Q,
-                             double *F, double *s, double *pf_upper)
+static int lambda_ils(int n, int m, const double *a, const double *Q,
+                      double *F, double *s, double *pf_upper, int split)
 {
     int info;
     double *L,*D,*Z,*z,*E;
@@ -191,20 +215,8 @@ extern int lambda_with_stats(int n, int m, const double *a, const double *Q,
     if (!(info=LD(n,Q,L,D))) {
         
         /* lambda reduction (z=Z'*a, Qz=Z'*Q*Z=L'*diag(D)*L) */
-        reduction(n,L,D,Z);
-        /* Bootstrapped success probability is a lower bound for ILS success.
-         * Use REDUCED conditional variances in cycles^2, not diag(Q).
-         * log1p/erfc and expm1 retain precision for strong models. */
-        if (pf_upper) {
-            double log_ps=0.0, tail;
-            int k;
-            for (k=0;k<n;k++) {
-                if (!(D[k]>0.0)||!isfinite(D[k])) { log_ps=NAN; break; }
-                tail=erfc(0.5/sqrt(2.0*D[k]));
-                log_ps+=log1p(-tail);
-            }
-            *pf_upper=-expm1(log_ps);
-        }
+        reduction(n,L,D,Z,split);
+        if (pf_upper) *pf_upper=bootstrap_pf(n,D);
         
         matmul("TN",n,1,n,Z,a,z); /* z=Z'*a */
         
@@ -218,6 +230,19 @@ extern int lambda_with_stats(int n, int m, const double *a, const double *Q,
     }
     free(L); free(D); free(Z); free(z); free(E);
     return info;
+}
+extern int lambda_with_stats(int n, int m, const double *a, const double *Q,
+                             double *F, double *s, double *pf_upper)
+{
+    return lambda_ils(n,m,a,Q,F,s,pf_upper,0);
+}
+/* Enumerate the last n-split coordinates first without committing their
+ * values. The radius and the top m costs always belong to the JOINT model. */
+extern int lambda_block_search(int n, int m, int split, const double *a,
+                               const double *Q, double *F, double *s)
+{
+    if (split<=0||split>=n) return -1;
+    return lambda_ils(n,m,a,Q,F,s,NULL,split);
 }
 /* Compatibility entry point for existing callers (including PPP). */
 extern int lambda(int n, int m, const double *a, const double *Q, double *F,
@@ -250,7 +275,7 @@ extern int lambda_reduction(int n, const double *Q, double *Z)
         return info;
     }
     /* lambda reduction */
-    reduction(n,L,D,Z);
+    reduction(n,L,D,Z,0);
      
     free(L); free(D);
     return 0;

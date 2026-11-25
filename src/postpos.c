@@ -465,7 +465,7 @@ static void procpos(FILE *fp, FILE *fptm, const prcopt_t *popt, const solopt_t *
         if (!strstr(popt->pppopt,"-ENA_FCB")) {
             corr_phase_bias_ssr(obs_ptr,n,&navs);
         }
-        if (!rtkpos(rtk, obs_ptr,n,&navs)) {
+        if (!rtkpos_tagged(rtk, obs_ptr,n,&navs)) {
             if (rtk->sol.eventime.time != 0) {
                 if (mode == SOLMODE_SINGLE_DIR) {
                     if (fptm) outinvalidtm(fptm, sopt, rtk->sol.eventime);
@@ -762,7 +762,8 @@ static int readobsnav(gtime_t ts, gtime_t te, double ti, const char **infile,
           if (tew.time > 0) tew = timeadd(tew, 60);
         }
         /* read rinex obs and nav file */
-        if (readrnxt(infile[i],rcv,tsw,tew,ti,prcopt->rnxopt[rcv<=1?0:1],obs,nav,
+        double read_interval=slipmon_enabled(prcopt)?0.0:ti;
+        if (readrnxt(infile[i],rcv,tsw,tew,read_interval,prcopt->rnxopt[rcv<=1?0:1],obs,nav,
                      rcv<=2?sta+rcv-1:NULL)<0) {
             checkbrk("error : insufficient memory");
             trace(1,"insufficient memory\n");
@@ -784,6 +785,37 @@ static int readobsnav(gtime_t ts, gtime_t te, double ti, const char **infile,
 
     /* delete duplicated ephemeris */
     uniqnav(nav);
+
+    if (slipmon_enabled(prcopt)) {
+        struct slipmon *monitor=NULL;
+        for (int r=1;r<=2;r++) {
+            int first=0,count;
+            while ((count=nextobsf(obs,&first,r))>0) {
+                if (!slipmon_scan(&monitor,obs->data+first,count,r,nav,prcopt)) {
+                    free(monitor); checkbrk("error : phase monitor initialization"); return 0;
+                }
+                first+=count;
+            }
+        }
+        free(monitor);
+        if (ti>0.0) {
+            /* Thin after tagging, carrying decoder LLI across omitted epochs
+             * just like the RINEX reader (also needed by legacy shadow mode). */
+            uint8_t lli[2][MAXSAT][NFREQ+NEXOBS]={{{0}}};
+            gtime_t zero={0};
+            for (i=j=0;i<obs->n;i++) {
+                obsd_t *o=obs->data+i;
+                int r=o->rcv-1,s=o->sat-1,keep=screent(o->time,zero,zero,ti);
+                if (r>=0&&r<2&&s>=0&&s<MAXSAT) for (int f=0;f<NFREQ+NEXOBS;f++) {
+                    lli[r][s][f]|=o->LLI[f]&LLI_SLIP;
+                    if (keep) { o->LLI[f]|=lli[r][s][f]; lli[r][s][f]=0; }
+                }
+                if (keep) obs->data[j++]=*o;
+            }
+            obs->n=j;
+            if (!(nepoch=sortobs(obs))) { checkbrk("error : no sampled observations"); return 0; }
+        }
+    }
 
     /* set time span for progress display */
     if (ts.time==0||te.time==0) {

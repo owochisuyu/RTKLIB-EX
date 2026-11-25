@@ -108,7 +108,7 @@ vt.o       : ../vt.h
 rtkcmn.o   : $(SRC)/rtklib.h
 trace.o    : $(SRC)/rtklib.h
 rtksvr.o   : $(SRC)/rtklib.h
-rtkpos.o   : $(SRC)/rtklib.h
+rtkpos.o   : $(SRC)/rtklib.h $(SRC)/slipmon.inc
 geoid.o    : $(SRC)/rtklib.h
 solution.o : $(SRC)/rtklib.h
 lambda.o   : $(SRC)/rtklib.h

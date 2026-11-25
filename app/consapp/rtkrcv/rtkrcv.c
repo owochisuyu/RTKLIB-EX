@@ -1460,7 +1460,8 @@ static void cmd_load(char **args, int narg, vt_t *vt)
     }
     resetsysopts();
     if (!loadopts(file,sysopts)) {
-        vt_printf(vt,"no options file: %s\n",file);
+        setsysopts(&prcopt,solopt,&filopt);
+        vt_printf(vt,"could not load processing options: %s\n",file);
         return;
     }
     getsysopts(&prcopt,solopt,&filopt);
@@ -1922,8 +1923,12 @@ int main(int argc, char **argv)
     if (!*file) sprintf(file,"%s/%s",OPTSDIR,OPTSFILE);
     
     resetsysopts();
-    if (!loadopts(file,rcvopts)||!loadopts(file,sysopts)) {
+    if (!loadopts(file,rcvopts)) {
         fprintf(stderr,"no options file: %s. defaults used\n",file);
+    }
+    else if (!loadopts(file,sysopts)) {
+        fprintf(stderr,"could not load processing options: %s\n",file);
+        return EXIT_FAILURE;
     }
     getsysopts(&prcopt,solopt,&filopt);
     /* Copy the system options for the second output solution stream */

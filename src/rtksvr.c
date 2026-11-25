@@ -160,6 +160,12 @@ static void update_glofcn(rtksvr_t *svr)
 static void update_obs(rtksvr_t *svr, obs_t *obs, int index, int iobs)
 {
     int i,n=0,sat,sys;
+    if (index<2&&slipmon_enabled(&svr->rtk.opt)&&
+        !slipmon_scan(&svr->rtk.slipmon_state,obs->data,obs->n,index+1,&svr->nav,&svr->rtk.opt)) {
+        trace(1,"phase monitor could not tag receiver %d epoch\n",index+1);
+        if (iobs<MAXOBSBUF) svr->obs[index][iobs].n=0;
+        return;
+    }
     
         if (iobs<MAXOBSBUF) {
             for (i=0;i<obs->n;i++) {
@@ -725,7 +731,7 @@ static void *rtksvrthread(void *arg)
             }
             /* rtk positioning */
             rtksvrlock(svr);
-            rtkpos(&svr->rtk,obs.data,obs.n,&svr->nav);
+            if (obs.n>0) rtkpos_tagged(&svr->rtk,obs.data,obs.n,&svr->nav);
             rtksvrunlock(svr);
             
             if (svr->rtk.sol.stat!=SOLQ_NONE) {

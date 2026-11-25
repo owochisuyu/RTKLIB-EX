@@ -453,6 +453,9 @@ extern "C" {
 #define ARMODE_CONT 1                   /* AR mode: continuous */
 #define ARMODE_INST 2                   /* AR mode: instantaneous */
 #define ARMODE_FIXHOLD 3                /* AR mode: fix and hold */
+#define ARSTRAT_FULL 0                  /* direct full-set search */
+#define ARSTRAT_WLNL 1                  /* full-set joint wide/narrow-lane search */
+#define ARSTRAT_PAR  2                  /* direct search on a covariance-selected set */
 
 #define GLO_ARMODE_OFF  0               /* GLO AR mode: off */
 #define GLO_ARMODE_ON 1                 /* GLO AR mode: on */
@@ -603,6 +606,8 @@ typedef struct {        /* observation data record */
 
     int timevalid;      /* time is valid (Valid GNSS fix) for time mark */
     gtime_t eventime;   /* time of event (GPST) */
+    uint32_t phase_arc[NFREQ]; /* receiver-local arcs; 0 = not observed */
+    uint8_t phase_skip[NFREQ]; /* isolate this phase sample, retain code */
 } obsd_t;
 
 typedef struct {        /* observation data */
@@ -1108,9 +1113,13 @@ typedef struct {        /* processing options type */
     char pppopt[256];   /* ppp option */
     int  ar_test;       /* ambiguity acceptance test (0:ratio,1:ffrt) */
     double ffrt_pf;     /* FFRT tolerable failure rate (0.01 or 0.001) */
-    int  par;           /* partial ambiguity resolution (0:off,1:on) */
+    int  reserved_ar;   /* former PAR flag; preserve offsets of following fields */
     int  par_minamb;    /* minimum number of ambiguities for PAR */
     double iono_tau;   /* weighted ionosphere GM correlation time (s), >0 */
+    int arstrategy;    /* one integer search strategy (ARSTRAT_*) */
+    int slipmon;       /* relative RTK slip monitor: 0=legacy,1=shadow,2=apply */
+    double slipgap;    /* maximum bridge between trusted phases (s) */
+    double par_minps;  /* model-only success floor for DD subset selection */
 } prcopt_t;
 
 typedef struct {        /* solution options type */
@@ -1221,6 +1230,8 @@ typedef struct {        /* satellite status type */
     double phw;         /* phase windup (cycle) */
     gtime_t pt[2][NFREQ]; /* previous carrier-phase time */
     double  ph[2][NFREQ]; /* previous carrier-phase observable (cycle) */
+    uint32_t phase_arc[2][NFREQ]; /* last arc consumed by the ambiguity state */
+    uint8_t phase_skip[NFREQ],ar_block[NFREQ]; /* current solver frequency */
 } ssat_t;
 
 typedef struct {        /* ambiguity control type */
@@ -1242,6 +1253,7 @@ typedef struct {        /* RTK control/result type */
     int nfix;           /* number of continuous fixes of ambiguity */
     int excsat;         /* index of next satellite to be excluded for partial ambiguity resolution */
     int nb_ar;          /* number of ambiguities used for AR last epoch */
+    unsigned char ar_attempted[MAXSAT]; /* attempted satellites, independently of FIX flags */
     char holdamb;       /* set if fix-and-hold has occurred at least once */
     ambc_t ambc[MAXSAT]; /* ambiguity control */
     ssat_t ssat[MAXSAT]; /* satellite status */
@@ -1252,6 +1264,7 @@ typedef struct {        /* RTK control/result type */
     int epoch;          /* epoch number */
     int intpres_nb;     /* Time interpolation of residuals, number of previous base observations */
     obsd_t intpres_obsb[MAXOBS]; /* Time interpolation of residuals, previous base observations */
+    struct slipmon *slipmon_state; /* owned, lazily created for streaming input */
 } rtk_t;
 
 typedef struct {        /* receiver raw data control type */
@@ -1871,6 +1884,9 @@ EXPORT void strsetproxy(const char *addr);
 #include "ffrt.h"
 EXPORT int lambda_with_stats(int n, int m, const double *a, const double *Q,
                              double *F, double *s, double *pf_upper);
+EXPORT double lambda_model_pf(int n, const double *Q);
+EXPORT int lambda_block_search(int n, int m, int split, const double *a,
+                               const double *Q, double *F, double *s);
 EXPORT int lambda(int n, int m, const double *a, const double *Q, double *F,
                   double *s);
 EXPORT int lambda_reduction(int n, const double *Q, double *Z);
@@ -1885,6 +1901,12 @@ EXPORT int pntpos(const obsd_t *obs, int n, const nav_t *nav,
 /* precise positioning -------------------------------------------------------*/
 EXPORT void rtkinit(rtk_t *rtk, const prcopt_t *opt);
 EXPORT void rtkfree(rtk_t *rtk);
+EXPORT int  slipmon_enabled(const prcopt_t *opt);
+/* Tag one receiver epoch in acquisition order. Start with *state=NULL;
+ * release the owned buffer with free(). rtkpos() accepts untagged input. */
+EXPORT int  slipmon_scan(struct slipmon **state, obsd_t *obs, int n, int rcv,
+                         const nav_t *nav, const prcopt_t *opt);
+EXPORT int  rtkpos_tagged(rtk_t *rtk,const obsd_t *obs,int n,const nav_t *nav);
 EXPORT int  rtkpos (rtk_t *rtk, const obsd_t *obs, int nobs, const nav_t *nav);
 EXPORT int  rtkopenstat(const char *file, int level);
 EXPORT void rtkclosestat(void);

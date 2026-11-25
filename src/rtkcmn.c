@@ -223,7 +223,8 @@ const prcopt_t prcopt_default={ /* defaults processing options */
     {"",""},                    /* anttype */
     {{0}},{{0}},{0},            /* antdel,pcv,exsats */
     1,1                         /* maxaveep,initrst */,
-    .ar_test=0, .ffrt_pf=0.001, .par=0, .par_minamb=0, .iono_tau=120.0
+    .ar_test=0, .ffrt_pf=0.001, .arstrategy=ARSTRAT_WLNL, .par_minamb=0, .iono_tau=120.0,
+    .slipmon=0, .slipgap=120.0, .par_minps=0.99
 };
 const solopt_t solopt_default={ /* defaults solution output options */
     SOLF_LLH,TIMES_GPST,1,3,    /* posf,times,timef,timeu */
@@ -1443,7 +1444,8 @@ extern int lsq(const double *A, const double *y, int n, int m, double *x,
 /* kalman filter ---------------------------------------------------------------
 * kalman filter state update as follows:
 *
-*   K=P*H*(H'*P*H+R)^-1, xp=x+K*v, Pp=(I-K*H')*P
+*   S=H'*P*H+R, S*K'=H'*P, xp=x+K*v
+*   A=I-K*H', Pp=A*P*A'+K*R*K' (Joseph form)
 *
 * args   : double *x        I   states vector (n x 1)
 *          double *P        I   covariance matrix of states (n x n)
@@ -1461,20 +1463,45 @@ static int filter_(const double *x, const double *P, const double *H,
                    const double *v, const double *R, int n, int m,
                    double *xp, double *Pp)
 {
-    double *F=mat(n,m),*Q=mat(m,m),*K=mat(n,m),*I=eye(n);
-    int info;
-
-    matcpy(Q,R,m,m);
-    matcpy(xp,x,n,1);
-    matmul("NN",n,m,n,P,H,F);       /* Q=H'*P*H+R */
-    matmulp("TN",m,m,n,H,F,Q);
-    if (!(info=matinv(Q,m))) {
-        matmul("NN",n,m,m,F,Q,K);   /* K=P*H*Q^-1 */
-        matmulp("NN",n,1,m,K,v,xp);  /* xp=x+K*v */
-        matmulm("NT",n,n,m,K,H,I);  /* Pp=(I-K*H')*P */
-        matmul("NN",n,n,n,I,P,Pp);
+    double *S=mat(m,m),*K=mat(n,m),*A=eye(n),*AP=mat(n,n),*KR=mat(n,m);
+    int info=-1;
+    matcpy(S,R,m,m);
+    matmul("NN",n,m,n,P,H,K);
+    matmulp("TN",m,m,n,H,K,S);
+    /* Factor the innovation covariance once. Solve for each gain row rather
+     * than multiplying by an explicit inverse of a nearly singular matrix. */
+    for (int j=0;j<m;j++) for (int i=j;i<m;i++) {
+        double s=0.5*(S[i+j*m]+S[j+i*m]);
+        for (int k=0;k<j;k++) s-=S[i+k*m]*S[j+k*m];
+        if (!isfinite(s)||(i==j&&s<=0.0)) goto done;
+        S[i+j*m]=i==j?sqrt(s):s/S[j+j*m];
     }
-    free(F); free(Q); free(K); free(I);
+    for (int j=0;j<m;j++) {
+        for (int k=0;k<j;k++) for (int i=0;i<n;i++) K[i+j*n]-=S[j+k*m]*K[i+k*n];
+        for (int i=0;i<n;i++) K[i+j*n]/=S[j+j*m];
+    }
+    for (int j=m-1;j>=0;j--) {
+        for (int k=j+1;k<m;k++) for (int i=0;i<n;i++) K[i+j*n]-=S[k+j*m]*K[i+k*n];
+        for (int i=0;i<n;i++) K[i+j*n]/=S[j+j*m];
+    }
+    matcpy(xp,x,n,1);
+    matmulp("NN",n,1,m,K,v,xp);
+    matmulm("NT",n,n,m,K,H,A);
+    matmul("NN",n,n,n,A,P,AP);
+    matmul("NT",n,n,n,AP,A,Pp);
+    matmul("NN",n,m,m,K,R,KR);
+    matmulp("NT",n,n,m,KR,K,Pp);
+    for (int i=0;i<n;i++) {
+        if (!isfinite(xp[i])||!isfinite(Pp[i+i*n])||Pp[i+i*n]<0.0) goto done;
+        for (int j=0;j<i;j++) {
+            double s=0.5*(Pp[i+j*n]+Pp[j+i*n]);
+            if (!isfinite(s)) goto done;
+            Pp[i+j*n]=Pp[j+i*n]=s;
+        }
+    }
+    info=0;
+done:
+    free(S); free(K); free(A); free(AP); free(KR);
     return info;
 }
 extern int filter(double *x, double *P, const double *H, const double *v,
@@ -1483,8 +1510,10 @@ extern int filter(double *x, double *P, const double *H, const double *v,
     double *x_,*xp_,*P_,*Pp_,*H_;
     int i,j,k,info,*ix;
 
+    if (n<=0||m<=0) return -1;
     /* create list of non-zero states */
     ix=imat(n,1); for (i=k=0;i<n;i++) if (x[i]!=0.0&&P[i+i*n]>0.0) ix[k++]=i;
+    if (!k) { free(ix); return -1; }
     x_=mat(k,1); xp_=mat(k,1); P_=mat(k,k); Pp_=mat(k,k); H_=mat(k,m);
     /* compress array by removing zero elements to save computation time */
     for (i=0;i<k;i++) {
@@ -1494,8 +1523,8 @@ extern int filter(double *x, double *P, const double *H, const double *v,
     }
     /* do kalman filter state update on compressed arrays */
     info=filter_(x_,P_,H_,v,R,k,m,xp_,Pp_);
-    /* copy values from compressed arrays back to full arrays */
-    for (i=0;i<k;i++) {
+    /* A failed update must leave the prior intact. */
+    for (i=0;!info&&i<k;i++) {
         x[ix[i]]=xp_[i];
         for (j=0;j<k;j++) P[ix[i]+ix[j]*n]=Pp_[i+j*k];
     }

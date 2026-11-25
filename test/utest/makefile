@@ -31,7 +31,7 @@ trace.o   : $(SRC)/rtklib.h $(SRC)/trace.c
 	$(CC) -c $(CFLAGS) $(SRC)/trace.c
 rinex.o    : $(SRC)/rtklib.h $(SRC)/rinex.c
 	$(CC) -c $(CFLAGS) $(SRC)/rinex.c
-rtkpos.o   : $(SRC)/rtklib.h $(SRC)/rtkpos.c
+rtkpos.o   : $(SRC)/rtklib.h $(SRC)/rtkpos.c $(SRC)/slipmon.inc
 	$(CC) -c $(CFLAGS) $(SRC)/rtkpos.c
 lambda.o   : $(SRC)/rtklib.h $(SRC)/lambda.c
 	$(CC) -c $(CFLAGS) $(SRC)/lambda.c

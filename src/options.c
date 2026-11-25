@@ -94,8 +94,9 @@ EXPORT opt_t sysopts[]={
     {"pos2-bdsarmode",  3,  (void *)&prcopt_.bdsmodear,  SWTOPT },
     {"pos2-artest",     3,  (void *)&prcopt_.ar_test,    "0:ratio,1:ffrt"},
     {"pos2-ffrtpf",     1,  (void *)&prcopt_.ffrt_pf,    "0.01 or 0.001"},
-    {"pos2-par",        3,  (void *)&prcopt_.par,        SWTOPT },
+    {"pos2-arstrategy", 3,  (void *)&prcopt_.arstrategy, "0:full,1:wlnl,2:par"},
     {"pos2-parminamb",  0,  (void *)&prcopt_.par_minamb, ""     },
+    {"pos2-parminps",   1,  (void *)&prcopt_.par_minps,  "0<Ps<=1 (subset selection)" },
     {"pos2-arthres",    1,  (void *)&prcopt_.thresar[0], ""     },
     {"pos2-arthresmin", 1,  (void *)&prcopt_.thresar[5], ""     },
     {"pos2-arthresmax", 1,  (void *)&prcopt_.thresar[6], ""     },
@@ -118,6 +119,8 @@ EXPORT opt_t sysopts[]={
     {"pos2-syncsol",    3,  (void *)&prcopt_.syncsol,    SWTOPT },
     {"pos2-slipthres",  1,  (void *)&prcopt_.thresslip,  "m"    },
     {"pos2-dopthres",   1,  (void *)&prcopt_.thresdop,   "m/s"  },
+    {"pos2-slipmon",    3,  (void *)&prcopt_.slipmon,    "0:legacy,1:shadow,2:apply"},
+    {"pos2-slipgap",    1,  (void *)&prcopt_.slipgap,    "s"    },
     {"pos2-rejionno",   1,  (void *)&prcopt_.maxinno[0], "m (DEPRECATED)"},
     {"pos2-rejphase",   1,  (void *)&prcopt_.maxinno[0], "m"    },
     {"pos2-rejcode",    1,  (void *)&prcopt_.maxinno[1], "m"    },
@@ -270,11 +273,20 @@ extern opt_t *searchopt(const char *name, const opt_t *opts)
     int i;
     
     trace(3,"searchopt: name=%s\n",name);
+    /* File-only legacy key: never treat it as an abbreviation of parminamb. */
+    if (opts==sysopts&&!strcmp(name,"pos2-par")) return NULL;
     
     for (i=0;*opts[i].name;i++) {
         if (strstr(opts[i].name,name)) return (opt_t *)(opts+i);
     }
     return NULL;
+}
+static int arstrategy_value(const char *s)
+{
+    if (!strcmp(s,"full")||!strcmp(s,"0")) return ARSTRAT_FULL;
+    if (!strcmp(s,"wlnl")||!strcmp(s,"1")) return ARSTRAT_WLNL;
+    if (!strcmp(s,"par") ||!strcmp(s,"2")) return ARSTRAT_PAR;
+    return -1;
 }
 /* string to option value ------------------------------------------------------
 * convert string to option value
@@ -284,6 +296,12 @@ extern opt_t *searchopt(const char *name, const opt_t *opts)
 *-----------------------------------------------------------------------------*/
 extern int str2opt(opt_t *opt, const char *str)
 {
+    if (opt->var==&prcopt_.arstrategy) {
+        int value=arstrategy_value(str);
+        if (value<0) return 0;
+        prcopt_.arstrategy=value;
+        return 1;
+    }
     switch (opt->format) {
         case 0: *(int    *)opt->var=atoi(str); break;
         case 1: *(double *)opt->var=atof(str); break;
@@ -346,7 +364,7 @@ extern int loadopts(const char *file, opt_t *opts)
     FILE *fp;
     opt_t *opt;
     char buff[2048],*p;
-    int n=0;
+    int n=0,selected=-1,old_par=-1,old_wlnl=-1;
     
     trace(3,"loadopts: file=%s\n",file);
     
@@ -368,7 +386,29 @@ extern int loadopts(const char *file, opt_t *opts)
         chop(buff);
         chop(p);
         while (*p==' '||*p=='\t') p++;
-        if (!(opt=searchopt(buff,opts))) continue;
+        char *key=buff;
+        while (*key==' '||*key=='\t') key++;
+        if (opts==sysopts&&(!strcmp(key,"pos2-par")||!strcmp(key,"pos2-wlnl"))) {
+            int *slot=!strcmp(key,"pos2-par")?&old_par:&old_wlnl;
+            int v=(!strcmp(p,"on")||!strcmp(p,"1"))?1:
+                  (!strcmp(p,"off")||!strcmp(p,"0"))?0:-1;
+            if (v<0||(*slot>=0&&v!=*slot)) {
+                fprintf(stderr,"invalid or conflicting %s (%s:%d)\n",key,file,n);
+                fclose(fp); return 0;
+            }
+            *slot=v;
+            continue;
+        }
+        if (!(opt=searchopt(key,opts))) continue;
+        if (opt->var==&prcopt_.arstrategy) {
+            int v=arstrategy_value(p);
+            if (v<0||(selected>=0&&selected!=v)) {
+                fprintf(stderr,"invalid or conflicting pos2-arstrategy (%s:%d); choose full, wlnl or par\n",file,n);
+                fclose(fp); return 0;
+            }
+            selected=v;
+            continue;
+        }
         
         if (!str2opt(opt,p)) {
             fprintf(stderr,"invalid option value %s (%s:%d)\n",buff,file,n);
@@ -376,6 +416,19 @@ extern int loadopts(const char *file, opt_t *opts)
         }
     }
     fclose(fp);
+    if (opts==sysopts) {
+        if (selected>=0) {
+            prcopt_.arstrategy=selected;
+        } else if (old_par==1&&old_wlnl==1) {
+            fprintf(stderr,"pos2-par and pos2-wlnl are both on (%s); choose one pos2-arstrategy\n",file);
+            return 0;
+        } else if (old_par==1) prcopt_.arstrategy=ARSTRAT_PAR;
+        else if (old_wlnl==1) prcopt_.arstrategy=ARSTRAT_WLNL;
+        else if ((old_par==0&&prcopt_.arstrategy==ARSTRAT_PAR)||
+                 (old_wlnl==0&&prcopt_.arstrategy==ARSTRAT_WLNL)) {
+            prcopt_.arstrategy=ARSTRAT_FULL;
+        }
+    }
     
     return 1;
 }
