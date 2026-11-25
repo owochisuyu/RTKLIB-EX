@@ -200,13 +200,17 @@ int main(int argc, char **argv)
         showmsg("error : no input file");
         return EXIT_FAILURE;
     }
+    const char *ml_hook = getenv("RTK_PY_AR_HOOK");
+    if (ml_hook && *ml_hook && !py_ar_init(ml_hook, NULL)) {
+        showmsg("error : requested ML hook is not ready; no epochs processed");
+        return EXIT_FAILURE;
+    }
     if (solopt.trace > 0) {
         if (*filopt.trace == '\0')
             sprintf(filopt.trace, "%s.trace", PROGNAME);
         traceopen(filopt.trace);
         tracelevel(solopt.trace);
     }
-        py_ar_init(NULL, NULL);
     ret=postpos(ts,te,tint,0.0,&prcopt,&solopt,&filopt,infile,n,outfile,rover,base);
     py_ar_cleanup();
 

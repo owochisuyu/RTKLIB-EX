@@ -1,94 +1,81 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <libgen.h>
 #include "py_ar_hook.h"
 
 static int g_py_active = 0;
+static int g_owns_python = 0;
 static PyObject *g_pModule = NULL;
 static PyObject *g_pFunc = NULL;
 
 int py_ar_init(const char *script_path, const char *func_name)
 {
+    const char *path = (script_path && *script_path) ? script_path : getenv("RTK_PY_AR_HOOK");
+    const char *fn = (func_name && *func_name) ? func_name : getenv("RTK_PY_AR_FUNC");
+    const char *base;
+    PyObject *globals, *value = NULL, *init = NULL;
+    FILE *stream;
+
     if (g_py_active) return 1;
-
-    const char *path = script_path;
-    if (!path || !*path) {
-        path = getenv("RTK_PY_AR_HOOK");
+    if (!path || !*path) return 0;
+    base = strrchr(path, '/');
+    if (strcmp(base ? base + 1 : path, "ml_ar_hook.py") ||
+        (fn && *fn && strcmp(fn, "evaluate_ar"))) {
+        fprintf(stderr, "[RTKLIB-C-PY-C] Expected ml_ar_hook.py:evaluate_ar, got %s:%s\n",
+                path, (fn && *fn) ? fn : "evaluate_ar");
+        return 0;
     }
-    if (!path || !*path) {
-        return 0; /* Not configured, hook inactive */
+    if (!(stream = fopen(path, "rb"))) {
+        fprintf(stderr, "[RTKLIB-C-PY-C] Cannot open ML hook %s: %s\n", path, strerror(errno));
+        return 0;
     }
-
-    const char *fn = func_name;
-    if (!fn || !*fn) {
-        fn = getenv("RTK_PY_AR_FUNC");
-    }
-    if (!fn || !*fn) {
-        fn = "evaluate_ar";
-    }
-
-    fprintf(stderr, "[RTKLIB-C-PY-C] Initializing embedded Python AR hook: script=%s, func=%s\n", path, fn);
-
     if (!Py_IsInitialized()) {
         Py_Initialize();
+        g_owns_python = 1;
     }
+    /* Execute this exact file; a failed path must not import a namesake on sys.path. */
+    g_pModule = PyModule_New("ml_ar_hook");
+    if (!g_pModule) goto failed;
+    globals = PyModule_GetDict(g_pModule);
+    value = PyUnicode_DecodeFSDefault(path);
+    if (!value || PyDict_SetItemString(globals, "__file__", value) < 0) goto failed;
+    Py_CLEAR(value);
+    value = PyRun_FileEx(stream, path, Py_file_input, globals, globals, 1);
+    stream = NULL; /* PyRun_FileEx closed it. */
+    if (!value) goto failed;
+    Py_CLEAR(value);
 
-    /* Extract directory and module name from path */
-    char path_buf1[1024];
-    char path_buf2[1024];
-    strncpy(path_buf1, path, sizeof(path_buf1) - 1);
-    strncpy(path_buf2, path, sizeof(path_buf2) - 1);
-    path_buf1[sizeof(path_buf1) - 1] = '\0';
-    path_buf2[sizeof(path_buf2) - 1] = '\0';
-
-    char *dir_name = dirname(path_buf1);
-    char *base_name = basename(path_buf2);
-
-    /* Strip .py extension if present */
-    char mod_name[256];
-    strncpy(mod_name, base_name, sizeof(mod_name) - 1);
-    mod_name[sizeof(mod_name) - 1] = '\0';
-    char *dot = strrchr(mod_name, '.');
-    if (dot && strcmp(dot, ".py") == 0) {
-        *dot = '\0';
+    g_pFunc = PyObject_GetAttrString(g_pModule, "evaluate_ar");
+    if (!g_pFunc) goto failed;
+    if (!PyCallable_Check(g_pFunc)) {
+        PyErr_SetString(PyExc_TypeError, "evaluate_ar must be callable");
+        goto failed;
     }
-
-    /* Add directory to sys.path */
-    PyObject *sys_path = PySys_GetObject("path");
-    if (sys_path) {
-        PyObject *py_dir = PyUnicode_FromString(dir_name);
-        PyList_Insert(sys_path, 0, py_dir);
-        Py_DECREF(py_dir);
+    init = PyObject_GetAttrString(g_pModule, "initialize_model");
+    if (!init) goto failed;
+    value = PyObject_CallObject(init, NULL);
+    if (!value) goto failed;
+    if (value != Py_True) {
+        PyErr_SetString(PyExc_RuntimeError, "initialize_model did not confirm readiness");
+        goto failed;
     }
-
-    /* Import module */
-    PyObject *pName = PyUnicode_FromString(mod_name);
-    g_pModule = PyImport_Import(pName);
-    Py_DECREF(pName);
-
-    if (!g_pModule) {
-        fprintf(stderr, "[RTKLIB-C-PY-C] ERROR: Failed to import Python module '%s' from '%s'\n", mod_name, dir_name);
-        PyErr_Print();
-        return 0;
-    }
-
-    g_pFunc = PyObject_GetAttrString(g_pModule, fn);
-    if (!g_pFunc || !PyCallable_Check(g_pFunc)) {
-        fprintf(stderr, "[RTKLIB-C-PY-C] ERROR: Cannot find callable '%s' in module '%s'\n", fn, mod_name);
-        if (PyErr_Occurred()) PyErr_Print();
-        Py_XDECREF(g_pFunc);
-        g_pFunc = NULL;
-        Py_DECREF(g_pModule);
-        g_pModule = NULL;
-        return 0;
-    }
-
+    Py_DECREF(value);
+    Py_DECREF(init);
     g_py_active = 1;
-    fprintf(stderr, "[RTKLIB-C-PY-C] Embedded Python AR hook activated successfully!\n");
+    fprintf(stderr, "[RTKLIB-C-PY-C] ML ready: %s:evaluate_ar\n", path);
     return 1;
+
+failed:
+    if (stream) fclose(stream);
+    fprintf(stderr, "[RTKLIB-C-PY-C] ML startup failed: %s\n", path);
+    if (PyErr_Occurred()) PyErr_Print();
+    Py_XDECREF(value);
+    Py_XDECREF(init);
+    py_ar_cleanup();
+    return 0;
 }
 
 int py_ar_is_active(void)
@@ -98,40 +85,34 @@ int py_ar_is_active(void)
 
 int py_ar_evaluate(const double *features, int n_feat)
 {
-    if (!g_py_active || !g_pFunc) {
-        return 0;
+    PyObject *result;
+    long decision;
+    if (!g_py_active || !features || n_feat != 6) return 0;
+    result = PyObject_CallFunction(g_pFunc, "dddddd", features[0], features[1],
+                                   features[2], features[3], features[4], features[5]);
+    if (result && PyLong_CheckExact(result)) {
+        decision = PyLong_AsLong(result);
+        if (!PyErr_Occurred() && (decision == 0 || decision == 1)) {
+            Py_DECREF(result);
+            return (int)decision;
+        }
     }
-
-    PyObject *pArgs = PyTuple_New(n_feat);
-    for (int i = 0; i < n_feat; i++) {
-        PyTuple_SetItem(pArgs, i, PyFloat_FromDouble(features[i]));
-    }
-
-    PyObject *pValue = PyObject_CallObject(g_pFunc, pArgs);
-    Py_DECREF(pArgs);
-
-    if (pValue != NULL) {
-        long res = PyLong_AsLong(pValue);
-        Py_DECREF(pValue);
-        return (int)res;
-    } else {
-        fprintf(stderr, "[RTKLIB-C-PY-C] Exception in Python evaluate_ar()!\n");
-        PyErr_Print();
-        return 0; /* Safe fallback: reject fix on exception */
-    }
+    fprintf(stderr, "[RTKLIB-C-PY-C] evaluate_ar failed or did not return integer 0 or 1; "
+                    "rejecting, ratio=%.17g lasting_epochs=%.17g blen_km=%.17g "
+                    "amb_dim=%.17g pdop=%.17g vtec=%.17g\n",
+            features[0], features[1], features[2], features[3], features[4], features[5]);
+    if (PyErr_Occurred()) PyErr_Print();
+    Py_XDECREF(result);
+    return 0;
 }
 
 void py_ar_cleanup(void)
 {
-    if (g_py_active) {
-        Py_XDECREF(g_pFunc);
-        g_pFunc = NULL;
-        Py_XDECREF(g_pModule);
-        g_pModule = NULL;
-        if (Py_IsInitialized()) {
-            Py_Finalize();
-        }
-        g_py_active = 0;
-        fprintf(stderr, "[RTKLIB-C-PY-C] Python AR hook finalized.\n");
+    g_py_active = 0;
+    Py_CLEAR(g_pFunc);
+    Py_CLEAR(g_pModule);
+    if (g_owns_python) {
+        g_owns_python = 0;
+        Py_Finalize();
     }
 }
